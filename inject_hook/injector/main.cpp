@@ -11,6 +11,23 @@
 
 #pragma comment(linker, "/subsystem:\"windows\" /entry:\"wmainCRTStartup\"")
 
+// Diagnostic launcher log. This is intentionally separate from the injected DLL's
+// log so launcher failures can be distinguished from a DLL that never loaded.
+static void WriteLauncherDiagnostic(const TCHAR* stage, DWORD errorCode = 0)
+{
+	TCHAR logPath[MAX_PATH] = {};
+	DWORD n = ::GetModuleFileName(NULL, logPath, _countof(logPath));
+	if( n == 0 || n >= _countof(logPath) ) return;
+	TCHAR* slash = _tcsrchr(logPath, TEXT('\\'));
+	if( !slash ) slash = _tcsrchr(logPath, TEXT('/'));
+	if( !slash ) return;
+	_tcscpy_s(slash + 1, _countof(logPath) - (size_t)(slash + 1 - logPath), TEXT("_injector_debug.txt"));
+	FILE* f = nullptr;
+	if( _tfopen_s(&f, logPath, TEXT("a")) != 0 || !f ) return;
+	_ftprintf(f, TEXT("stage=%s error=%lu\n"), stage ? stage : TEXT("unknown"), errorCode);
+	fclose(f);
+}
+
 // TargetID: �v���Z�XID
 // �߂�l: ���� �]�݂�HWND / ���s NULL
 bool IsBackgroundLaunch()
@@ -109,6 +126,7 @@ static LPVOID CreatePreEntryBootstrap(Process& process, LPVOID remoteDllPath,
 
 int _tmain(int argc, _TCHAR* argv[])
 {
+	WriteLauncherDiagnostic(TEXT("launcher_start"));
 	/*if (argc != 3)
 	{
 		std::cout << "Usage is: simple_example executable dll" << std::endl;
@@ -212,6 +230,7 @@ int _tmain(int argc, _TCHAR* argv[])
 			if( option )
 			{
 				DWORD idleResult = WaitForInputIdle( pInfo.hProcess, 5000 );
+				WriteLauncherDiagnostic(TEXT("wait_for_input_idle_returned"), idleResult);
 				if( idleResult != 0 && idleResult != WAIT_TIMEOUT )
 				{
 					throw std::exception("WaitForInputIdle failed");
@@ -321,9 +340,11 @@ int _tmain(int argc, _TCHAR* argv[])
 				}
 			}
 			std::cout << "DLL successfully injected" << std::endl;
+			WriteLauncherDiagnostic(TEXT("launcher_completed"));
 		}
 		catch (std::exception& e)
 		{
+			WriteLauncherDiagnostic(TEXT("injector_exception"));
 			std::cout << "Error while trying to inject dll into process: " << e.what() << std::endl;
 			ResumeThread(pInfo.hThread);
 			CloseHandle(pInfo.hThread);
@@ -333,6 +354,7 @@ int _tmain(int argc, _TCHAR* argv[])
 	else
 	{
 		DWORD lastErr = GetLastError();
+		WriteLauncherDiagnostic(TEXT("create_process_failed"), lastErr);
 		std::cout << "Failed to start process, system error: " << lastErr << std::endl;
 	}
 	return 0;
