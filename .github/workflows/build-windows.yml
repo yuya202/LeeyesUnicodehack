@@ -1,4 +1,4 @@
-name: Build Leeyes Unicode Hack (Win32)
+name: Build Leeyes Unicode Hack - Archive Diagnostics
 
 on:
   workflow_dispatch:
@@ -32,8 +32,8 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          # Pass the C4996 suppression option directly to the MSVC compiler.
-          $env:CL = '/wd4996'
+          # Diagnostic-only build: enable archive plug-in tracing and suppress the existing C4996 warning.
+          $env:CL = '/wd4996 /DUNICODEHACK_PLUGIN_DEBUG=1'
 
           msbuild '.\LeeyesHook.sln' /m /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /verbosity:minimal
 
@@ -58,6 +58,7 @@ jobs:
           }
 
           Copy-Item -LiteralPath '.\inject_dll.ini' -Destination '.\Leeyes\inject_dll.ini' -Force
+          Add-Content -LiteralPath '.\Leeyes\inject_dll.ini' -Value "`n[Debug]`nDebugLog=1" -Encoding ascii
 
           # Verify that both outputs are 32-bit PE images (IMAGE_FILE_MACHINE_I386 = 0x14c).
           foreach ($file in @('.\Leeyes\inject_dll.dll', '.\Leeyes\LeeyesW.exe')) {
@@ -94,7 +95,8 @@ jobs:
               'Leeyes Unicode Hack - GitHub Actions build'
               "Repository commit: $env:GITHUB_SHA"
               "Built at (UTC): $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss'))"
-              'Configuration: Release | Win32 (x86)'
+              'Configuration: Release | Win32 (x86) | Archive diagnostics enabled'
+              'NOTE: Diagnostic build only. It logs archive plug-in calls to _path_debug.txt when the test ZIP is opened.'
               'Included: inject_dll.dll, LeeyesW.exe, inject_dll.ini'
               'NOTE: C4996 warning suppression was enabled for this build.'
               'NOTE: Leeyes.exe is intentionally NOT included; use the existing Leeyes.exe.'
@@ -116,8 +118,8 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LeeyesUnicodeHack-Win32
-          path: dist/LeeyesUnicodeHack_Win32.zip
+          name: LeeyesUnicodeHack-ArchiveDiagnostics
+          path: dist/LeeyesUnicodeHack_ArchiveDiagnostics.zip
           if-no-files-found: error
           retention-days: 14
 
