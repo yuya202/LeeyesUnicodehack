@@ -182,6 +182,7 @@ int _tmain(int argc, _TCHAR* argv[])
 
 	if (CreateProcess(path, NULL, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, current_dir, &sInfo, &pInfo))
 	{
+		WriteLauncherDiagnostic(TEXT("create_process_ok"));
 		try
 		{
 			Process process(pInfo.dwProcessId);
@@ -224,8 +225,10 @@ int _tmain(int argc, _TCHAR* argv[])
 			ctx.Eip = reinterpret_cast<DWORD>(CreatePreEntryBootstrap(
 				process, remoteDllPath, originalEntryPoint, pLoadLibrary, pGetProcAddress));
 			if (!SetThreadContext(pInfo.hThread, &ctx)) throw std::exception("SetThreadContext failed");
+			WriteLauncherDiagnostic(TEXT("bootstrap_installed"));
 
 			ResumeThread(pInfo.hThread);
+			WriteLauncherDiagnostic(TEXT("primary_thread_resumed"));
 
 			if( option )
 			{
