@@ -1,3 +1,4 @@
+
 #pragma once
 
 #include <wincodec.h>
@@ -22,6 +23,8 @@ static std::wstring GetColorDirectory()
 		path()
 		{
 			DWORD size = MAX_PATH;
+			// Suppress the deprecation diagnostic for this call only.
+			#pragma warning(suppress : 4996)
 			::GetColorDirectoryW(NULL, buf, &size );
 		}
 
