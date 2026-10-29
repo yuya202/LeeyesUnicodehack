@@ -3944,13 +3944,25 @@ std::string GetArchiveRetryPath( LPCSTR path )
 	std::string result;
 	if( !widePath.empty() )
 	{
-		// If CP932 gives us a unique real directory entry, keep the plugin on the
-		// user's actual path. The A/W file hooks repair the lossy CP932 spelling at
-		// the filesystem boundary, so no TEMP alias is needed when it is unique.
+		// Only pass the real path to legacy archive plug-ins when CP932 can
+		// represent it without loss. A lossy best-fit spelling may resolve to the
+		// right filesystem entry through our hooks, yet still confuse a plug-in
+		// that performs its own path parsing or archive enumeration.
 		std::string directPath;
 		std::wstring collisionPath;
+		bool exactCp932Path = false;
 		if( Utility::WideToCP932BestFit(widePath, directPath)
-			&& !Utility::HasAnsiPathLengthIssue(directPath)
+			&& !Utility::HasAnsiPathLengthIssue(directPath) )
+		{
+			int wideLength = ::MultiByteToWideChar(932, 0, directPath.c_str(), -1, nullptr, 0);
+			if( wideLength > 0 )
+			{
+				std::vector<wchar_t> decoded((size_t)wideLength);
+				if( ::MultiByteToWideChar(932, 0, directPath.c_str(), -1, decoded.data(), wideLength) > 0 )
+					exactCp932Path = (std::wstring(decoded.data()) == widePath);
+			}
+		}
+		if( exactCp932Path
 			&& Utility::ResolveAnsiPathCollision(directPath, collisionPath)
 			&& collisionPath == widePath )
 			result = directPath;
@@ -4411,15 +4423,20 @@ int __stdcall ArchiveFileInfoDispatchImpl(ArchivePluginCallContext* context, LPS
 	long Len, LPSTR Filename, unsigned int Flag, LPVOID Inf)
 {
 	auto original = reinterpret_cast<GetFileInfoAM00FPtr>(context->original);
-	auto ret = original( Buf, Len, Filename, Flag, Inf );
-	auto originalResult = ret;
 	std::string retryPath;
-	if( !(Flag & 0x07) && Buf && NeedsArchivePathAlias(Buf) && ret != SPI_ALL_RIGHT )
+	bool needsAlias = !(Flag & 0x07) && Buf && NeedsArchivePathAlias(Buf);
+	int ret = SPI_OTHER_ERROR;
+	if( needsAlias )
 	{
 		retryPath = GetArchiveRetryPath( Buf );
 		if( !retryPath.empty() )
 			ret = original( const_cast<LPSTR>(retryPath.c_str()), Len, Filename, Flag, Inf );
+		if( retryPath.empty() || ret != SPI_ALL_RIGHT )
+			ret = original( Buf, Len, Filename, Flag, Inf );
 	}
+	else
+		ret = original( Buf, Len, Filename, Flag, Inf );
+	auto originalResult = ret;
 #if UNICODEHACK_PLUGIN_DEBUG
 	char nameInfo[MAX_PATH * 2] = {};
 	sprintf_s(nameInfo, "filename=%s", Filename ? Filename : "<null>");
@@ -4432,16 +4449,22 @@ int __stdcall ArchiveInfoDispatchImpl(ArchivePluginCallContext* context, LPSTR B
 	long Len, unsigned int Flag, HLOCAL *Inf)
 {
 	auto original = reinterpret_cast<GetArchiveInfoAM00FPtr>(context->original);
-	int originalResult = original( Buf, Len, Flag, Inf );
-	int ret = originalResult;
 	std::string retryPath;
 	bool needsAlias = !(Flag & 0x07) && Buf && NeedsArchivePathAlias(Buf);
-	if( ret != SPI_ALL_RIGHT && needsAlias )
+	int ret = SPI_OTHER_ERROR;
+	if( needsAlias )
 	{
+		// Try the lossless ASCII alias first. Some plug-ins report success even
+		// when a lossy parent path causes them to return an empty archive listing.
 		retryPath = GetArchiveRetryPath( Buf );
 		if( !retryPath.empty() )
 			ret = original( const_cast<LPSTR>(retryPath.c_str()), Len, Flag, Inf );
+		if( retryPath.empty() || ret != SPI_ALL_RIGHT )
+			ret = original( Buf, Len, Flag, Inf );
 	}
+	else
+		ret = original( Buf, Len, Flag, Inf );
+	int originalResult = ret;
 #if UNICODEHACK_PLUGIN_DEBUG
 	LogPluginPath( "GetArchiveInfo", Buf, retryPath.c_str(), originalResult, ret, context->moduleName );
 #endif
