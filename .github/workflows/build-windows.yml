@@ -22,20 +22,23 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+
           New-Item -ItemType Directory -Force -Path 'Leeyes' | Out-Null
+
           New-Item -ItemType Directory -Force -Path 'dist' | Out-Null
 
       - name: Build solution (Release Win32)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # The repository's WIC_Loader project currently fails on C4996 because
-          # the Windows SDK marks GetColorDirectoryW as deprecated. Suppress
-          # this specific compiler warning for this build so the required
-          # inject_dll.dll and LeeyesW.exe outputs can be packaged.
-          msbuild '.\LeeyesHook.sln' /m /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /p:DisableSpecificWarnings=4996 /verbosity:minimal
+
+          # Pass the C4996 suppression option directly to the MSVC compiler.
+          $env:CL = '/wd4996'
+
+          msbuild '.\LeeyesHook.sln' /m /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /verbosity:minimal
+
           if ($LASTEXITCODE -ne 0) {
-            throw "MSBuild failed with exit code $LASTEXITCODE"
+              throw "MSBuild failed with exit code $LASTEXITCODE"
           }
 
       - name: Assemble and verify build package
@@ -44,60 +47,68 @@ jobs:
           $ErrorActionPreference = 'Stop'
 
           $required = @(
-            '.\Leeyes\inject_dll.dll',
-            '.\Leeyes\LeeyesW.exe'
+              '.\Leeyes\inject_dll.dll',
+              '.\Leeyes\LeeyesW.exe'
           )
+
           foreach ($file in $required) {
-            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
-              throw "Required build output not found: $file"
-            }
+              if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+                  throw "Required build output not found: $file"
+              }
           }
 
           Copy-Item -LiteralPath '.\inject_dll.ini' -Destination '.\Leeyes\inject_dll.ini' -Force
 
           # Verify that both outputs are 32-bit PE images (IMAGE_FILE_MACHINE_I386 = 0x14c).
           foreach ($file in @('.\Leeyes\inject_dll.dll', '.\Leeyes\LeeyesW.exe')) {
-            $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $file))
-            if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
-              throw "Not a valid PE/MZ file: $file"
-            }
-            $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
-            if ($peOffset -lt 0 -or $peOffset + 6 -gt $bytes.Length -or
-                $bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45 -or
-                $bytes[$peOffset + 2] -ne 0 -or $bytes[$peOffset + 3] -ne 0) {
-              throw "Invalid PE header: $file"
-            }
-            $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
-            if ($machine -ne 0x014c) {
-              throw "Expected 32-bit x86 PE (0x014c), got 0x$('{0:X4}' -f $machine): $file"
-            }
+              $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $file))
+
+              if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+                  throw "Not a valid PE/MZ file: $file"
+              }
+
+              $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+
+              if ($peOffset -lt 0 -or $peOffset + 6 -gt $bytes.Length -or
+                  $bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45 -or
+                  $bytes[$peOffset + 2] -ne 0 -or $bytes[$peOffset + 3] -ne 0) {
+                  throw "Invalid PE header: $file"
+              }
+
+              $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+
+              if ($machine -ne 0x014c) {
+                  throw "Expected 32-bit x86 PE (0x014c), got 0x$('{0:X4}' -f $machine): $file"
+              }
           }
 
           $ini = Get-Content -LiteralPath '.\Leeyes\inject_dll.ini' -Raw
+
           foreach ($setting in @('HookFindFirstFile=1', 'HookSetWindowText=1', 'HookTextDrawing=1')) {
-            if ($ini -notmatch [regex]::Escape($setting)) {
-              throw "Expected setting missing from inject_dll.ini: $setting"
-            }
+              if ($ini -notmatch [regex]::Escape($setting)) {
+                  throw "Expected setting missing from inject_dll.ini: $setting"
+              }
           }
 
           @(
-            'Leeyes Unicode Hack - GitHub Actions build'
-            "Repository commit: $env:GITHUB_SHA"
-            "Built at (UTC): $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss'))"
-            'Configuration: Release | Win32 (x86)'
-            'Included: inject_dll.dll, LeeyesW.exe, inject_dll.ini'
-            'NOTE: C4996 warning suppression was enabled for this build.'
-            'NOTE: Leeyes.exe is intentionally NOT included; use the existing Leeyes.exe.'
-            'NOTE: A successful build does not prove runtime compatibility or that the mojibake is fixed.'
+              'Leeyes Unicode Hack - GitHub Actions build'
+              "Repository commit: $env:GITHUB_SHA"
+              "Built at (UTC): $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss'))"
+              'Configuration: Release | Win32 (x86)'
+              'Included: inject_dll.dll, LeeyesW.exe, inject_dll.ini'
+              'NOTE: C4996 warning suppression was enabled for this build.'
+              'NOTE: Leeyes.exe is intentionally NOT included; use the existing Leeyes.exe.'
+              'NOTE: A successful build does not prove runtime compatibility or that the mojibake is fixed.'
           ) | Set-Content -LiteralPath '.\Leeyes\BUILD-INFO.txt' -Encoding utf8
 
           $hashes = Get-ChildItem -LiteralPath '.\Leeyes' -File |
-            Where-Object { $_.Name -in @('inject_dll.dll', 'LeeyesW.exe', 'inject_dll.ini', 'BUILD-INFO.txt') } |
-            Sort-Object Name |
-            ForEach-Object {
-              $h = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
-              "$($h.Hash.ToLower())  $($_.Name)"
-            }
+              Where-Object { $_.Name -in @('inject_dll.dll', 'LeeyesW.exe', 'inject_dll.ini', 'BUILD-INFO.txt') } |
+              Sort-Object Name |
+              ForEach-Object {
+                  $h = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
+                  "$($h.Hash.ToLower()) $($_.Name)"
+              }
+
           $hashes | Set-Content -LiteralPath '.\Leeyes\SHA256SUMS.txt' -Encoding ascii
 
           Compress-Archive -Path '.\Leeyes\inject_dll.dll', '.\Leeyes\LeeyesW.exe', '.\Leeyes\inject_dll.ini', '.\Leeyes\BUILD-INFO.txt', '.\Leeyes\SHA256SUMS.txt' -DestinationPath '.\dist\LeeyesUnicodeHack_Win32.zip' -Force
