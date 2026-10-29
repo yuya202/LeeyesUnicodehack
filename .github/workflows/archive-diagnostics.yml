@@ -1,0 +1,136 @@
+name: Build Leeyes Unicode Hack - Archive Diagnostics
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - diagnose-archive-empty-listing
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout diagnostic branch
+        uses: actions/checkout@v4
+        with:
+          ref: diagnose-archive-empty-listing
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Prepare output directory
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path 'Leeyes' | Out-Null
+          New-Item -ItemType Directory -Force -Path 'dist' | Out-Null
+
+      - name: Build solution (Release Win32)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:CL = '/wd4996 /DUNICODEHACK_PLUGIN_DEBUG=1'
+          msbuild '.\LeeyesHook.sln' /m /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) {
+              throw "MSBuild failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Assemble and verify diagnostic package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $required = @('.\Leeyes\inject_dll.dll', '.\Leeyes\LeeyesW.exe')
+          foreach ($file in $required) {
+              if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+                  throw "Required build output not found: $file"
+              }
+          }
+
+          Copy-Item -LiteralPath '.\inject_dll.ini' -Destination '.\Leeyes\inject_dll.ini' -Force
+          Add-Content -LiteralPath '.\Leeyes\inject_dll.ini' -Value "`n[Debug]`nDebugLog=1" -Encoding ascii
+
+          foreach ($file in @('.\Leeyes\inject_dll.dll', '.\Leeyes\LeeyesW.exe')) {
+              $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $file))
+              if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+                  throw "Not a valid PE/MZ file: $file"
+              }
+              $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+              if ($peOffset -lt 0 -or $peOffset + 6 -gt $bytes.Length -or
+                  $bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45 -or
+                  $bytes[$peOffset + 2] -ne 0 -or $bytes[$peOffset + 3] -ne 0) {
+                  throw "Invalid PE header: $file"
+              }
+              $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+              if ($machine -ne 0x014c) {
+                  throw "Expected 32-bit x86 PE (0x014c), got 0x$('{0:X4}' -f $machine): $file"
+              }
+          }
+
+          $ini = Get-Content -LiteralPath '.\Leeyes\inject_dll.ini' -Raw
+          foreach ($setting in @('HookFindFirstFile=1', 'HookSetWindowText=1', 'HookTextDrawing=1')) {
+              if ($ini -notmatch [regex]::Escape($setting)) {
+                  throw "Expected setting missing from inject_dll.ini: $setting"
+              }
+          }
+
+          @(
+              'Leeyes Unicode Hack - GitHub Actions build'
+              "Repository commit: $env:GITHUB_SHA"
+              "Built at (UTC): $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss'))"
+              'Configuration: Release | Win32 (x86) | Archive diagnostics enabled'
+              'NOTE: Diagnostic build only. It logs archive plug-in calls to _path_debug.txt when the test ZIP is opened.'
+              'Included: inject_dll.dll, LeeyesW.exe, inject_dll.ini'
+              'NOTE: Leeyes.exe is intentionally NOT included; use the existing Leeyes.exe.'
+              'NOTE: A successful build does not prove runtime compatibility or that the mojibake is fixed.'
+          ) | Set-Content -LiteralPath '.\Leeyes\BUILD-INFO.txt' -Encoding utf8
+
+          @(
+              'Leeyes Unicode Hack - Archive Diagnostics test instructions'
+              ''
+              'IMPORTANT: The diagnostic DLL is not loaded by launching Leeyes.exe directly.'
+              'LeeyesW.exe is the injector/launcher and must be run from the SAME folder as the existing Leeyes.exe and inject_dll.dll.'
+              ''
+              '1. Close every running Leeyes.exe and LeeyesW.exe process.'
+              '2. Copy LeeyesW.exe, inject_dll.dll, and inject_dll.ini from this package into the test folder that already contains your working Leeyes.exe.'
+              '3. Do not run LeeyesW.exe from the extracted package folder unless that folder also contains the intended Leeyes.exe.'
+              '4. Start LeeyesW.exe from the test folder, then reproduce the ZIP-open failure.'
+              '5. After the test, look in that same test folder for _path_debug.txt and _injector_debug.txt.'
+              '6. If LeeyesW.exe causes a runtime error, do not repeatedly retry. Preserve both log files if present.'
+              ''
+              'Do not replace or modify Leeyes.exe.'
+          ) | Set-Content -LiteralPath '.\Leeyes\TEST-INSTRUCTIONS.txt' -Encoding utf8
+
+          $hashes = Get-ChildItem -LiteralPath '.\Leeyes' -File |
+              Where-Object { $_.Name -in @('inject_dll.dll', 'LeeyesW.exe', 'inject_dll.ini', 'BUILD-INFO.txt', 'TEST-INSTRUCTIONS.txt') } |
+              Sort-Object Name |
+              ForEach-Object {
+                  $h = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
+                  "$($h.Hash.ToLower()) $($_.Name)"
+              }
+          $hashes | Set-Content -LiteralPath '.\Leeyes\SHA256SUMS.txt' -Encoding ascii
+
+          Compress-Archive -Path '.\Leeyes\inject_dll.dll', '.\Leeyes\LeeyesW.exe', '.\Leeyes\inject_dll.ini', '.\Leeyes\BUILD-INFO.txt', '.\Leeyes\TEST-INSTRUCTIONS.txt', '.\Leeyes\SHA256SUMS.txt' -DestinationPath '.\dist\LeeyesUnicodeHack_ArchiveDiagnostics.zip' -Force
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LeeyesUnicodeHack-ArchiveDiagnostics
+          path: dist/LeeyesUnicodeHack_ArchiveDiagnostics.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LeeyesUnicodeHack-build-logs
+          path: |
+            **/*.log
+            **/MSBuild*.binlog
+          if-no-files-found: ignore
+          retention-days: 7
