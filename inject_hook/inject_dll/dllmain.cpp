@@ -5194,6 +5194,20 @@ BOOL APIENTRY DllMain( HMODULE hModule,
 		#if UNICODEHACK_PATH_DEBUG || UNICODEHACK_PLUGIN_DEBUG
 			Utility::gDebugLogEnabled = Profile->Get("Debug", "DebugLog", UINT()) != 0;
 		#endif
+		#if UNICODEHACK_PLUGIN_DEBUG
+			// Diagnostic builds must prove that the injected DLL loaded even if
+			// the INI parser does not recognize the Debug section or no archive
+			// plug-in entry point is reached. Force logging on and write a startup
+			// marker beside the DLL; normal builds are unaffected.
+			Utility::gDebugLogEnabled = true;
+			FILE* startupLog = nullptr;
+			if( Utility::OpenDebugLog(&startupLog) )
+			{
+				fprintf(startupLog, "diagnostic startup: module=%p ini DebugLog=%u\\n",
+					gInjectedModule, Profile->Get("Debug", "DebugLog", UINT()));
+				fclose(startupLog);
+			}
+		#endif
 		}
 
 		if(Profile->Get( "Option", "HookFindFirstFile", 1 ) )
