@@ -4452,21 +4452,36 @@ int __stdcall ArchiveInfoDispatchImpl(ArchivePluginCallContext* context, LPSTR B
 	std::string retryPath;
 	bool needsAlias = !(Flag & 0x07) && Buf && NeedsArchivePathAlias(Buf);
 	int ret = SPI_OTHER_ERROR;
+	int firstResult = SPI_OTHER_ERROR;
+	int secondResult = SPI_OTHER_ERROR;
 	if( needsAlias )
 	{
-		// Try the lossless ASCII alias first. Some plug-ins report success even
-		// when a lossy parent path causes them to return an empty archive listing.
+		// Keep both results distinct: a plug-in may return SPI_ALL_RIGHT with
+		// an empty or unusable listing, so the return code alone is not enough
+		// to establish that the retry path worked.
 		retryPath = GetArchiveRetryPath( Buf );
 		if( !retryPath.empty() )
-			ret = original( const_cast<LPSTR>(retryPath.c_str()), Len, Flag, Inf );
+		{
+			firstResult = original( const_cast<LPSTR>(retryPath.c_str()), Len, Flag, Inf );
+			ret = firstResult;
+		}
 		if( retryPath.empty() || ret != SPI_ALL_RIGHT )
-			ret = original( Buf, Len, Flag, Inf );
+		{
+			secondResult = original( Buf, Len, Flag, Inf );
+			ret = secondResult;
+		}
 	}
 	else
-		ret = original( Buf, Len, Flag, Inf );
-	int originalResult = ret;
+	{
+		firstResult = original( Buf, Len, Flag, Inf );
+		ret = firstResult;
+	}
 #if UNICODEHACK_PLUGIN_DEBUG
-	LogPluginPath( "GetArchiveInfo", Buf, retryPath.c_str(), originalResult, ret, context->moduleName );
+	char detail[MAX_PATH * 2] = {};
+	sprintf_s(detail, "retry=[%s] inf=%p size=%lu flags=%u len=%ld",
+		retryPath.c_str(), (Inf ? *Inf : nullptr),
+		(unsigned long)((Inf && *Inf) ? ::LocalSize(*Inf) : 0), Flag, Len);
+	LogPluginPath( "GetArchiveInfo", Buf, detail, firstResult, secondResult, context->moduleName );
 #endif
 	return ret;
 }
