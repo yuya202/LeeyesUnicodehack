@@ -57,15 +57,29 @@ bool Process::duplicateHandle(HANDLE hSrc, HANDLE* hDest)
 void Process::writeMemory(LPVOID address, LPCVOID data, DWORD size) const
 {
 	SIZE_T written = 0;
-	WriteProcessMemory(hProcess_, address, data, size, &written);
-	if (written != size) throw MemoryAccessException("Write memory failed!");
+	BOOL ok = WriteProcessMemory(hProcess_, address, data, size, &written);
+	if (!ok || written != size)
+	{
+		DWORD error = GetLastError();
+		std::ostringstream message;
+		message << "WriteProcessMemory failed: requested=" << size
+			<< ", written=" << written << ", Win32Error=" << error;
+		throw MemoryAccessException(message.str());
+	}
 }
 
 void Process::readMemory(LPVOID address, LPVOID buffer, DWORD size) const
 {
 	SIZE_T read = 0;
-	ReadProcessMemory(hProcess_, address, buffer, size, &read);
-	if (read != size) throw MemoryAccessException("Read memory failed!");
+	BOOL ok = ReadProcessMemory(hProcess_, address, buffer, size, &read);
+	if (!ok || read != size)
+	{
+		DWORD error = GetLastError();
+		std::ostringstream message;
+		message << "ReadProcessMemory failed: requested=" << size
+			<< ", read=" << read << ", Win32Error=" << error;
+		throw MemoryAccessException(message.str());
+	}
 }
 
 MEMORY_BASIC_INFORMATION Process::queryMemory(LPVOID address) const
