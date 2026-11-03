@@ -1,10 +1,10 @@
-name: Build Leeyes Unicode Hack - Archive Diagnostics
+name: Build Leeyes Unicode Hack - Archive Diagnostics - Bootstrap Status
 
 on:
   workflow_dispatch:
   push:
     branches:
-      - diagnose-archive-empty-listing-v8-ntdll-loader
+      - diagnose-archive-empty-listing-v9-bootstrap-status
 
 permissions:
   contents: read
@@ -18,7 +18,7 @@ jobs:
       - name: Checkout diagnostic branch
         uses: actions/checkout@v4
         with:
-          ref: diagnose-archive-empty-listing-v8-ntdll-loader
+          ref: diagnose-archive-empty-listing-v9-bootstrap-status
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
@@ -82,8 +82,8 @@ jobs:
               'Leeyes Unicode Hack - GitHub Actions build'
               "Repository commit: $env:GITHUB_SHA"
               "Built at (UTC): $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss'))"
-              'Configuration: Release | Win32 (x86) | Archive diagnostics enabled'
-              'Diagnostic build: launcher waits for the initial Windows debugger breakpoint, resolves loader functions from ntdll.dll, calls LdrLoadDll and LdrGetProcedureAddress in the target process, initializes hooks before the Leeyes EXE entry point, and records NTSTATUS values.'
+              'Configuration: Release | Win32 (x86) | Archive diagnostics enabled; bootstrap status recorded before debugger detach'
+              'Diagnostic build: launcher waits for the initial Windows debugger breakpoint, resolves loader functions from ntdll.dll, calls LdrLoadDll and LdrGetProcedureAddress in the target process, initializes hooks before the Leeyes EXE entry point, and records NTSTATUS values before attempting debugger detach.'
               'The launcher uses ntdll.dll loader APIs at the initial Windows system breakpoint, before the Leeyes EXE entry point.'
               'LeeyesW.exe is not included or used.'
               'Included: inject_dll.dll, LeeyesDiagLauncher.exe, inject_dll.ini, test instructions, build info, and hashes.'
@@ -92,7 +92,7 @@ jobs:
           ) | Set-Content -LiteralPath '.\Leeyes\BUILD-INFO.txt' -Encoding utf8
 
           @(
-              'Leeyes Unicode Hack - Archive Diagnostics test instructions'
+              'Leeyes Unicode Hack - Archive Diagnostics - Bootstrap Status test instructions'
               ''
               'IMPORTANT: Double-clicking Leeyes.exe directly does not load the diagnostic DLL.'
               'LeeyesDiagLauncher.exe starts the EXISTING standard Leeyes.exe under DEBUG_ONLY_THIS_PROCESS, waits for the initial system breakpoint, then calls ntdll.dll LdrLoadDll and LdrGetProcedureAddress in the target process to load and initialize inject_dll.dll before the Leeyes EXE entry point.'
@@ -117,13 +117,13 @@ jobs:
               }
           $hashes | Set-Content -LiteralPath '.\Leeyes\SHA256SUMS.txt' -Encoding ascii
 
-          Compress-Archive -Path '.\Leeyes\inject_dll.dll', '.\Leeyes\LeeyesDiagLauncher.exe', '.\Leeyes\inject_dll.ini', '.\Leeyes\BUILD-INFO.txt', '.\Leeyes\TEST-INSTRUCTIONS.txt', '.\Leeyes\SHA256SUMS.txt' -DestinationPath '.\dist\LeeyesUnicodeHack_ArchiveDiagnostics_20261103_v8.zip' -Force
+          Compress-Archive -Path '.\Leeyes\inject_dll.dll', '.\Leeyes\LeeyesDiagLauncher.exe', '.\Leeyes\inject_dll.ini', '.\Leeyes\BUILD-INFO.txt', '.\Leeyes\TEST-INSTRUCTIONS.txt', '.\Leeyes\SHA256SUMS.txt' -DestinationPath '.\dist\LeeyesUnicodeHack_ArchiveDiagnostics_20261103_v9.zip' -Force
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LeeyesUnicodeHack-ArchiveDiagnostics-20261103-v8
-          path: dist/LeeyesUnicodeHack_ArchiveDiagnostics_20261103_v8.zip
+          name: LeeyesUnicodeHack-ArchiveDiagnostics-20261103-v9
+          path: dist/LeeyesUnicodeHack_ArchiveDiagnostics_20261103_v9.zip
           if-no-files-found: error
           retention-days: 14
 
