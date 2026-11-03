@@ -206,6 +206,9 @@ static LPVOID CreatePreEntryBootstrap(Process& process, LPVOID remoteDllPath,
 		code.push_back(0xFF); code.push_back(0xE2);
 	};
 
+	// Preserve the startup register and flags state across the loader calls.
+	code.push_back(0x9C); // pushfd
+	code.push_back(0x60); // pushad
 	storeStage(1);
 	AppendPushImmediate(code, static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteDllPath)));
 	code.push_back(0xB8);
@@ -251,7 +254,11 @@ static LPVOID CreatePreEntryBootstrap(Process& process, LPVOID remoteDllPath,
 	AppendDword(code, 0);
 
 	size_t entryJump = code.size();
-	jumpToEntry();
+	// Restore the initial-breakpoint context before continuing execution.
+	code.push_back(0x61); // popad
+	code.push_back(0x9D); // popfd
+	AppendPushImmediate(code, originalEntryPoint);
+	code.push_back(0xC3); // ret
 
 	auto patchRel8 = [&](size_t displacement, size_t target)
 	{
@@ -274,6 +281,105 @@ static LPVOID CreatePreEntryBootstrap(Process& process, LPVOID remoteDllPath,
 	LPVOID remoteCode = process.allocMem(static_cast<DWORD>(code.size()));
 	process.writeMemory(remoteCode, code.data(), static_cast<DWORD>(code.size()));
 	return remoteCode;
+}
+
+
+// The initial system breakpoint is delivered after Windows initializes PEB.Ldr
+// and before the target EXE reaches its entry point.
+static void CloseDebugEventHandles(const DEBUG_EVENT& event)
+{
+	switch( event.dwDebugEventCode )
+	{
+	case CREATE_PROCESS_DEBUG_EVENT:
+		if( event.u.CreateProcessInfo.hFile ) CloseHandle(event.u.CreateProcessInfo.hFile);
+		if( event.u.CreateProcessInfo.hThread ) CloseHandle(event.u.CreateProcessInfo.hThread);
+		if( event.u.CreateProcessInfo.hProcess ) CloseHandle(event.u.CreateProcessInfo.hProcess);
+		break;
+	case CREATE_THREAD_DEBUG_EVENT:
+		if( event.u.CreateThread.hThread ) CloseHandle(event.u.CreateThread.hThread);
+		break;
+	case LOAD_DLL_DEBUG_EVENT:
+		if( event.u.LoadDll.hFile ) CloseHandle(event.u.LoadDll.hFile);
+		break;
+	default:
+		break;
+	}
+}
+
+static void ContinueDebugEventChecked(const DEBUG_EVENT& event, DWORD disposition)
+{
+	if( !ContinueDebugEvent(event.dwProcessId, event.dwThreadId, disposition) )
+	{
+		DWORD error = GetLastError();
+		std::ostringstream message;
+		message << "ContinueDebugEvent failed: " << error;
+		throw std::runtime_error(message.str());
+	}
+}
+
+static DEBUG_EVENT WaitForInitialSystemBreakpoint(const PROCESS_INFORMATION& processInfo)
+{
+	const ULONGLONG started = GetTickCount64();
+	for(;;)
+	{
+		DEBUG_EVENT event = {};
+		if( !WaitForDebugEvent(&event, 1000) )
+		{
+			DWORD error = GetLastError();
+			if( error == ERROR_SEM_TIMEOUT )
+			{
+				if( GetTickCount64() - started >= 30000 )
+					throw std::runtime_error("Timed out waiting for the initial Windows debugger breakpoint");
+				continue;
+			}
+			std::ostringstream message;
+			message << "WaitForDebugEvent failed: " << error;
+			throw std::runtime_error(message.str());
+		}
+		if( event.dwProcessId == processInfo.dwProcessId
+			&& event.dwThreadId == processInfo.dwThreadId
+			&& event.dwDebugEventCode == EXCEPTION_DEBUG_EVENT
+			&& event.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT )
+		{
+			WriteLauncherDiagnostic(TEXT("initial_system_breakpoint_received"));
+			return event;
+		}
+		DWORD disposition = event.dwDebugEventCode == EXCEPTION_DEBUG_EVENT
+			? DBG_EXCEPTION_NOT_HANDLED : DBG_CONTINUE;
+		const bool exited = event.dwDebugEventCode == EXIT_PROCESS_DEBUG_EVENT;
+		CloseDebugEventHandles(event);
+		ContinueDebugEventChecked(event, disposition);
+		if( exited ) throw std::runtime_error("Leeyes exited before the initial system breakpoint");
+	}
+}
+
+static RemoteBootstrapStatus WaitForBootstrapWithDebugEvents(
+	const PROCESS_INFORMATION& processInfo, Process& process, LPVOID remoteStatus)
+{
+	const ULONGLONG started = GetTickCount64();
+	RemoteBootstrapStatus status = {};
+	for(;;)
+	{
+		process.readMemory(remoteStatus, &status, sizeof(status));
+		if( status.stage == 4 || status.stage >= 0xE0 ) return status;
+		if( GetTickCount64() - started >= 30000 )
+			throw std::runtime_error("DLL bootstrap did not report completion within 30 seconds");
+		DEBUG_EVENT event = {};
+		if( !WaitForDebugEvent(&event, 50) )
+		{
+			DWORD error = GetLastError();
+			if( error == ERROR_SEM_TIMEOUT ) continue;
+			std::ostringstream message;
+			message << "WaitForDebugEvent failed during DLL bootstrap: " << error;
+			throw std::runtime_error(message.str());
+		}
+		const bool exited = event.dwDebugEventCode == EXIT_PROCESS_DEBUG_EVENT;
+		DWORD disposition = event.dwDebugEventCode == EXCEPTION_DEBUG_EVENT
+			? DBG_EXCEPTION_NOT_HANDLED : DBG_CONTINUE;
+		CloseDebugEventHandles(event);
+		ContinueDebugEventChecked(event, disposition);
+		if( exited ) throw std::runtime_error("Leeyes exited during DLL bootstrap");
+	}
 }
 
 
@@ -333,11 +439,17 @@ int _tmain(int argc, _TCHAR* argv[])
 	PROCESS_INFORMATION pInfo= {0};
 	LPTSTR option = argv[1];
 
-	if (CreateProcess(path, NULL, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, current_dir, &sInfo, &pInfo))
+	if (CreateProcess(path, NULL, NULL, NULL, FALSE, DEBUG_ONLY_THIS_PROCESS, NULL, current_dir, &sInfo, &pInfo))
 	{
 		WriteLauncherDiagnostic(TEXT("create_process_ok"));
+		bool initialBreakpointPending = false;
 		try
 		{
+			SetLauncherStage(TEXT("wait_for_initial_system_breakpoint"));
+			if( !DebugSetProcessKillOnExit(FALSE) )
+				throw std::runtime_error("DebugSetProcessKillOnExit failed");
+			DEBUG_EVENT initialBreakpoint = WaitForInitialSystemBreakpoint(pInfo);
+			initialBreakpointPending = true;
 			SetLauncherStage(TEXT("open_target_process"));
 			Process process(pInfo.dwProcessId);
 
@@ -375,47 +487,51 @@ int _tmain(int argc, _TCHAR* argv[])
 			// independently (inject_dll.dll blocks p9np.dll's own load and hides P9NP from
 			// this process's view of the network provider list), so this ordering is safe
 			// again and lets hooks cover Leeyes' full startup sequence.
-			SetLauncherStage(TEXT("read_target_image_base"));
-			uintptr_t imageBase = process.getImageBase(pInfo.hThread);
-			IMAGE_DOS_HEADER dosHeader;
-			process.readMemory((LPVOID)imageBase, &dosHeader, sizeof(dosHeader));
-			IMAGE_NT_HEADERS ntHeaders;
-			process.readMemory((LPVOID)(imageBase + dosHeader.e_lfanew), &ntHeaders, sizeof(ntHeaders));
-			DWORD originalEntryPoint = (DWORD)(imageBase + ntHeaders.OptionalHeader.AddressOfEntryPoint);
-
-			SetLauncherStage(TEXT("read_target_entry_context"));
+			// The initial system breakpoint occurs after ntdll initialized PEB.Ldr
+			// and before Leeyes reaches its EXE entry point.
+			SetLauncherStage(TEXT("read_initial_breakpoint_context"));
 			CONTEXT ctx = {};
 			ctx.ContextFlags = CONTEXT_CONTROL;
-			if (!GetThreadContext(pInfo.hThread, &ctx)) throw std::exception("GetThreadContext failed");
+			if( !GetThreadContext(pInfo.hThread, &ctx) )
+				throw std::runtime_error("GetThreadContext failed at the initial system breakpoint");
+			DWORD resumeAddress = ctx.Eip;
+			const DWORD exceptionAddress = reinterpret_cast<DWORD>(
+				initialBreakpoint.u.Exception.ExceptionRecord.ExceptionAddress);
+			if( resumeAddress == exceptionAddress )
+			{
+				BYTE opcode = 0;
+				process.readMemory(reinterpret_cast<LPVOID>(exceptionAddress), &opcode, sizeof(opcode));
+				if( opcode != 0xCC )
+					throw std::runtime_error("Initial breakpoint EIP is ambiguous; refusing to alter startup context");
+				++resumeAddress;
+			}
+			else if( resumeAddress != exceptionAddress + 1 )
+				throw std::runtime_error("Initial breakpoint EIP does not match the expected x86 INT3 instruction");
+			WriteLauncherDiagnostic(TEXT("initial_breakpoint_resume_eip"), resumeAddress);
 
-			// Keep the primary thread suspended while LoadLibraryW returns and the
-			// exported internal-hook initializer runs outside loader lock. The stub
-			// then jumps to the original entry point without changing its startup stack.
-			SetLauncherStage(TEXT("install_pre_entry_bootstrap"));
+			SetLauncherStage(TEXT("install_initial_breakpoint_bootstrap"));
 			ctx.Eip = reinterpret_cast<DWORD>(CreatePreEntryBootstrap(
 				process, remoteDllPath, remoteStatus, remoteInitName,
-				originalEntryPoint, pLoadLibrary, pGetProcAddress));
-			if (!SetThreadContext(pInfo.hThread, &ctx)) throw std::exception("SetThreadContext failed");
+				resumeAddress, pLoadLibrary, pGetProcAddress));
+			if( !SetThreadContext(pInfo.hThread, &ctx) )
+				throw std::runtime_error("SetThreadContext failed while installing initial-breakpoint bootstrap");
 			WriteLauncherDiagnostic(TEXT("bootstrap_installed"));
-			SetLauncherStage(TEXT("resume_and_wait_for_dll_bootstrap"));
 
-			ResumeThread(pInfo.hThread);
-			WriteLauncherDiagnostic(TEXT("primary_thread_resumed"));
+			SetLauncherStage(TEXT("continue_initial_breakpoint"));
+			ContinueDebugEventChecked(initialBreakpoint, DBG_CONTINUE);
+			initialBreakpointPending = false;
 
-			// Resuming the primary thread is not proof that LoadLibrary succeeded.
-			// Read the bootstrap's explicit status from the target process.
-			const ULONGLONG injectionWaitStarted = GetTickCount64();
-			RemoteBootstrapStatus bootstrapStatus = {};
-			for(;;)
+			SetLauncherStage(TEXT("wait_for_dll_bootstrap_with_debug_events"));
+			RemoteBootstrapStatus bootstrapStatus =
+				WaitForBootstrapWithDebugEvents(pInfo, process, remoteStatus);
+			if( !DebugActiveProcessStop(pInfo.dwProcessId) )
 			{
-				process.readMemory(remoteStatus, &bootstrapStatus, sizeof(bootstrapStatus));
-				if( bootstrapStatus.stage == 4 || bootstrapStatus.stage >= 0xE0 ) break;
-				if( WaitForSingleObject(pInfo.hProcess, 0) == WAIT_OBJECT_0 )
-					throw std::exception("Leeyes exited during DLL bootstrap");
-				if( GetTickCount64() - injectionWaitStarted >= 30000 )
-					throw std::exception("DLL bootstrap did not report completion within 30 seconds");
-				Sleep(10);
+				DWORD error = GetLastError();
+				std::ostringstream message;
+				message << "DebugActiveProcessStop failed after successful bootstrap: " << error;
+				throw std::runtime_error(message.str());
 			}
+			WriteLauncherDiagnostic(TEXT("debugger_detached"));
 			WriteLauncherDiagnostic(TEXT("dll_loadlibrary_result"),
 				bootstrapStatus.loadLibraryResult);
 			WriteLauncherDiagnostic(TEXT("dll_initializer_export"),
@@ -546,7 +662,12 @@ int _tmain(int argc, _TCHAR* argv[])
 		{
 			WriteLauncherException(gLauncherStage, e.what());
 			std::cout << "Error while trying to inject dll into process: " << e.what() << std::endl;
-			ResumeThread(pInfo.hThread);
+			if( initialBreakpointPending )
+			{
+				ContinueDebugEvent(pInfo.dwProcessId, pInfo.dwThreadId, DBG_CONTINUE);
+				initialBreakpointPending = false;
+			}
+			DebugActiveProcessStop(pInfo.dwProcessId);
 			CloseHandle(pInfo.hThread);
 			CloseHandle(pInfo.hProcess);
 		}
