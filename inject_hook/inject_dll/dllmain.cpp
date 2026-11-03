@@ -1975,7 +1975,7 @@ void LogSyntheticArchiveAttributeAccess(const char* api, const char* input,
 	if( !resolved.empty() )
 		::WideCharToMultiByte(CP_UTF8, 0, resolved.c_str(), -1,
 			resolvedUtf8, sizeof(resolvedUtf8), nullptr, nullptr);
-	fprintf(lf, "archive_file_api api=%s input=[%s] mapped=%d resolved_utf8=[%s] result=%s attributes=0x%08lX last_error=%lu\\n",
+	fprintf(lf, "archive_file_api api=%s input=[%s] mapped=%d resolved_utf8=[%s] result=%s attributes=0x%08lX last_error=%lu\n",
 		api ? api : "?", input, mapped ? 1 : 0, resolvedUtf8,
 		attributes != INVALID_FILE_ATTRIBUTES ? "SUCCESS" : "FAIL",
 		(unsigned long)attributes, (unsigned long)lastError);
