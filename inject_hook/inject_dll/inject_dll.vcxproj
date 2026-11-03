@@ -41,6 +41,11 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
+    <UNICODEHACK_PATH_DEBUG Condition="'$(UNICODEHACK_PATH_DEBUG)' == ''">0</UNICODEHACK_PATH_DEBUG>
+    <UNICODEHACK_PLUGIN_DEBUG Condition="'$(UNICODEHACK_PLUGIN_DEBUG)' == ''">0</UNICODEHACK_PLUGIN_DEBUG>
+    <UNICODEHACK_DIAGNOSTIC_BUILD Condition="'$(UNICODEHACK_DIAGNOSTIC_BUILD)' == ''">0</UNICODEHACK_DIAGNOSTIC_BUILD>
+  </PropertyGroup>
+  <PropertyGroup>
     <_ProjectFileVersion>11.0.61030.0</_ProjectFileVersion>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -82,7 +87,7 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/source-charset:utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;_USRDLL;INJECT_TEST_EXPORTS;UNICODEHACK_PATH_DEBUG=0;UNICODEHACK_PLUGIN_DEBUG=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;_USRDLL;INJECT_TEST_EXPORTS;UNICODEHACK_PATH_DEBUG=$(UNICODEHACK_PATH_DEBUG);UNICODEHACK_PLUGIN_DEBUG=$(UNICODEHACK_PLUGIN_DEBUG);UNICODEHACK_DIAGNOSTIC_BUILD=$(UNICODEHACK_DIAGNOSTIC_BUILD);%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <PrecompiledHeader />
