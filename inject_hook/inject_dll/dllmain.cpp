@@ -1937,6 +1937,7 @@ CreateFileAFPtr originalCreateFileA = nullptr;
 
 // v12: trace only synthetic archive aliases at the final Win32 file-open boundary.
 // Build workflow trigger after updating the v12 artifact metadata.
+// Rebuild after the workflow branch filter was restored.
 #if UNICODEHACK_PLUGIN_DEBUG
 void LogSyntheticArchiveFileAccess(const char* api, const char* input,
 	const std::wstring& resolved, bool mapped, HANDLE result, DWORD lastError)
