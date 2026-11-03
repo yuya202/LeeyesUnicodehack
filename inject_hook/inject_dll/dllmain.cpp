@@ -1935,6 +1935,34 @@ typedef HANDLE  (WINAPI *CreateFileAFPtr)(     __in     LPCSTR lpFileName,
 );
 CreateFileAFPtr originalCreateFileA = nullptr;
 
+#if UNICODEHACK_PLUGIN_DEBUG
+void LogSyntheticArchiveFileAccess(const char* api, const char* input,
+	const std::wstring& resolved, bool mapped, HANDLE result, DWORD lastError)
+{
+	if( !input || !Utility::HasSyntheticAlias(input) ) return;
+	FILE* lf = nullptr;
+	if( !Utility::OpenDebugLog(&lf) ) return;
+	char resolvedUtf8[MAX_PATH * 4] = {};
+	if( !resolved.empty() )
+		::WideCharToMultiByte(CP_UTF8, 0, resolved.c_str(), -1,
+			resolvedUtf8, sizeof(resolvedUtf8), nullptr, nullptr);
+	fprintf(lf, "archive_file_api api=%s input=[%s] mapped=%d resolved_utf8=[%s] result=%s last_error=%lu\n",
+		api ? api : "?", input, mapped ? 1 : 0, resolvedUtf8,
+		result != INVALID_HANDLE_VALUE ? "SUCCESS" : "FAIL", (unsigned long)lastError);
+	fclose(lf);
+}
+
+void LogSyntheticArchiveFileAccessW(const char* api, LPCWSTR input,
+	const std::wstring& resolved, bool mapped, HANDLE result, DWORD lastError)
+{
+	if( !input || !wcsstr(input, L"\\~u") ) return;
+	char inputUtf8[MAX_PATH * 4] = {};
+	::WideCharToMultiByte(CP_UTF8, 0, input, -1, inputUtf8,
+		sizeof(inputUtf8), nullptr, nullptr);
+	LogSyntheticArchiveFileAccess(api, inputUtf8, resolved, mapped, result, lastError);
+}
+#endif
+
 bool IsExtendedAnsiPath( LPCSTR path )
 {
 	return path && strncmp(path, "\\\\?\\", 4) == 0;
@@ -2021,6 +2049,15 @@ HANDLE  WINAPI CreateFileAHook(    __in     LPCSTR lpFileName,
 	#endif
 		::SetLastError(lastErr2);
 	}
+#if UNICODEHACK_PLUGIN_DEBUG
+	if( hasSyntheticAlias )
+	{
+		DWORD diagnosticError = ::GetLastError();
+		LogSyntheticArchiveFileAccess("CreateFileA", pathForWideResolution,
+			resolvedWide, !resolvedWide.empty(), ret, diagnosticError);
+		::SetLastError(diagnosticError);
+	}
+#endif
 	return ret;
 }
 void hookCreateFileA()
@@ -2071,7 +2108,8 @@ HANDLE  WINAPI CreateFileWHook(    __in     LPCWSTR lpFileName,
 )
 {
 	std::wstring resolved;
-	HANDLE ret = TryResolveSyntheticWidePath(lpFileName, resolved)
+	const bool syntheticMapped = TryResolveSyntheticWidePath(lpFileName, resolved);
+	HANDLE ret = syntheticMapped
 		? Utility::CreateFileWLong(resolved, dwDesiredAccess, dwShareMode, lpSecurityAttributes,
 			dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile)
 		: originalCreateFileW(lpFileName,dwDesiredAccess, dwShareMode,lpSecurityAttributes,dwCreationDisposition,dwFlagsAndAttributes  ,hTemplateFile   );
@@ -2092,6 +2130,15 @@ HANDLE  WINAPI CreateFileWHook(    __in     LPCWSTR lpFileName,
 			fprintf(lf, "CreateFileW in(utf8)=[%s] ret=%s\n", utf8, (ret != INVALID_HANDLE_VALUE) ? "SUCCESS" : "FAIL");
 			fclose(lf);
 		}
+	}
+#endif
+#if UNICODEHACK_PLUGIN_DEBUG
+	if( lpFileName && wcsstr(lpFileName, L"\\~u") )
+	{
+		DWORD diagnosticError = ::GetLastError();
+		LogSyntheticArchiveFileAccessW("CreateFileW", lpFileName,
+			resolved, syntheticMapped, ret, diagnosticError);
+		::SetLastError(diagnosticError);
 	}
 #endif
 	return ret;
