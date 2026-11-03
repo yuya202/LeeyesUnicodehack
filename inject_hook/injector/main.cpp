@@ -107,37 +107,36 @@ static void AppendPushImmediate(std::vector<BYTE>& code, DWORD value)
 
 struct RemoteListEntry32 { DWORD flink; DWORD blink; };
 struct RemoteUnicodeString32 { USHORT length; USHORT maximumLength; DWORD buffer; };
+struct RemoteAnsiString32 { USHORT length; USHORT maximumLength; DWORD buffer; };
 
-static LPVOID GetRemoteAddressForLocalFunction(Process& process, HANDLE primaryThread,
-	FARPROC localFunction)
+static LPVOID GetRemoteAddressForLocalFunction(Process& process, HANDLE primaryThread, FARPROC localFunction)
 {
 	SetLauncherStage(TEXT("resolve_api_local_owner"));
-	if( !localFunction ) throw std::exception("Local API address is null");
+	if( !localFunction ) throw std::exception("Local ntdll API address is null");
 	HMODULE localOwner = nullptr;
 	SetLauncherStage(TEXT("resolve_api_get_local_module"));
-	if( !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
-		| GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+	if( !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 		reinterpret_cast<LPCWSTR>(localFunction), &localOwner) )
-		throw std::exception("GetModuleHandleExW failed for system API");
+		throw std::exception("GetModuleHandleExW failed for ntdll API");
 	WCHAR modulePath[MAX_PATH] = {};
-	SetLauncherStage(TEXT("resolve_api_get_module_path"));
 	if( !GetModuleFileNameW(localOwner, modulePath, _countof(modulePath)) )
-		throw std::exception("GetModuleFileNameW failed for system API");
+		throw std::exception("GetModuleFileNameW failed for ntdll API");
 	const WCHAR* moduleName = wcsrchr(modulePath, L'\\');
 	moduleName = moduleName ? moduleName + 1 : modulePath;
+	if( _wcsicmp(moduleName, L"ntdll.dll") != 0 )
+		throw std::exception("Resolved loader API is not owned by ntdll.dll");
 
 	CONTEXT context = {};
 	context.ContextFlags = CONTEXT_SEGMENTS;
 	SetLauncherStage(TEXT("resolve_api_get_thread_context"));
 	if( !GetThreadContext(primaryThread, &context) )
-		throw std::exception("GetThreadContext failed while resolving remote module");
+		throw std::exception("GetThreadContext failed while resolving remote ntdll");
 	LDT_ENTRY fsEntry = {};
 	SetLauncherStage(TEXT("resolve_api_get_fs_selector"));
 	if( !GetThreadSelectorEntry(primaryThread, context.SegFs, &fsEntry) )
-		throw std::exception("GetThreadSelectorEntry failed while resolving remote module");
+		throw std::exception("GetThreadSelectorEntry failed while resolving remote ntdll");
 	DWORD fsBase = (static_cast<DWORD>(fsEntry.HighWord.Bytes.BaseHi) << 24)
-		| (static_cast<DWORD>(fsEntry.HighWord.Bytes.BaseMid) << 16)
-		| fsEntry.BaseLow;
+		| (static_cast<DWORD>(fsEntry.HighWord.Bytes.BaseMid) << 16) | fsEntry.BaseLow;
 	DWORD peb = 0;
 	SetLauncherStage(TEXT("resolve_api_read_peb_pointer"));
 	process.readMemory(reinterpret_cast<LPVOID>(fsBase + 0x30), &peb, sizeof(peb));
@@ -161,12 +160,12 @@ static LPVOID GetRemoteAddressForLocalFunction(Process& process, HANDLE primaryT
 		if( remoteBase && baseName.buffer && baseName.length >= sizeof(WCHAR)
 			&& baseName.length <= MAX_PATH * sizeof(WCHAR) )
 		{
-			std::vector<WCHAR> name(baseName.length / sizeof(WCHAR) + 1, L'\\0');
+			std::vector<WCHAR> name(baseName.length / sizeof(WCHAR) + 1, L'\0');
 			process.readMemory(reinterpret_cast<LPVOID>(baseName.buffer), name.data(), baseName.length);
-			if( _wcsicmp(name.data(), moduleName) == 0 )
+			if( _wcsicmp(name.data(), L"ntdll.dll") == 0 )
 			{
-				const uintptr_t rva = reinterpret_cast<uintptr_t>(localFunction)
-					- reinterpret_cast<uintptr_t>(localOwner);
+				const uintptr_t rva = reinterpret_cast<uintptr_t>(localFunction) - reinterpret_cast<uintptr_t>(localOwner);
+				WriteLauncherDiagnostic(TEXT("remote_ntdll_module_found"), remoteBase);
 				return reinterpret_cast<LPVOID>(static_cast<uintptr_t>(remoteBase) + rva);
 			}
 		}
@@ -174,116 +173,100 @@ static LPVOID GetRemoteAddressForLocalFunction(Process& process, HANDLE primaryT
 		process.readMemory(reinterpret_cast<LPVOID>(link), &current, sizeof(current));
 		link = current.flink;
 	}
-	throw std::exception("Could not locate API owner module in Leeyes PEB loader list");
+	throw std::exception("Could not locate ntdll.dll in Leeyes PEB loader list");
 }
 
 struct RemoteBootstrapStatus
 {
 	DWORD stage;
-	DWORD loadLibraryResult;
-	DWORD getProcAddressResult;
+	DWORD loadLibraryStatus;
+	DWORD loadedModule;
+	DWORD getProcAddressStatus;
+	DWORD initializerAddress;
 };
 
-static LPVOID CreatePreEntryBootstrap(Process& process, LPVOID remoteDllPath,
-	LPVOID remoteStatus, LPVOID remoteInitName, DWORD originalEntryPoint,
-	LPVOID loadLibrary, LPVOID getProcAddress)
+static LPVOID CreatePreEntryBootstrap(Process& process, LPVOID remoteStatus,
+	LPVOID remoteDllName, LPVOID remoteDllHandle, LPVOID remoteInitAnsi,
+	LPVOID remoteInitAddress, DWORD resumeAddress, LPVOID ldrLoadDll, LPVOID ldrGetProcedureAddress)
 {
 	std::vector<BYTE> code;
-	auto movEdx = [&](DWORD value)
-	{
-		code.push_back(0xBA);
-		AppendDword(code, value);
-	};
-	auto storeStage = [&](DWORD value)
-	{
+	auto movEdx = [&](DWORD value) { code.push_back(0xBA); AppendDword(code, value); };
+	auto storeStage = [&](DWORD value) {
 		movEdx(static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteStatus)));
-		code.push_back(0xC7); code.push_back(0x02);
-		AppendDword(code, value);
+		code.push_back(0xC7); code.push_back(0x02); AppendDword(code, value);
 	};
-	auto jumpToEntry = [&]()
-	{
-		code.push_back(0xBA);
-		AppendDword(code, originalEntryPoint);
-		code.push_back(0xFF); code.push_back(0xE2);
+	auto storeEax = [&](BYTE offset) {
+		movEdx(static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteStatus)));
+		code.push_back(0x89); code.push_back(0x42); code.push_back(offset);
+	};
+	auto appendResume = [&]() {
+		code.push_back(0x61); code.push_back(0x9D);
+		AppendPushImmediate(code, resumeAddress); code.push_back(0xC3);
 	};
 
-	// Preserve the startup register and flags state across the loader calls.
-	code.push_back(0x9C); // pushfd
-	code.push_back(0x60); // pushad
+	code.push_back(0x9C); code.push_back(0x60);
 	storeStage(1);
-	AppendPushImmediate(code, static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteDllPath)));
-	code.push_back(0xB8);
-	AppendDword(code, static_cast<DWORD>(reinterpret_cast<uintptr_t>(loadLibrary)));
+	// LdrLoadDll(NULL, NULL, &DllName, &DllHandle)
+	AppendPushImmediate(code, static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteDllHandle)));
+	AppendPushImmediate(code, static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteDllName)));
+	AppendPushImmediate(code, 0); AppendPushImmediate(code, 0);
+	code.push_back(0xB8); AppendDword(code, static_cast<DWORD>(reinterpret_cast<uintptr_t>(ldrLoadDll)));
 	code.push_back(0xFF); code.push_back(0xD0);
-	movEdx(static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteStatus)));
-	code.push_back(0x89); code.push_back(0x42); code.push_back(0x04);
-	storeStage(2);
+	storeEax(4);
 	code.push_back(0x85); code.push_back(0xC0);
-	code.push_back(0x74);
-	size_t loadFailedJump = code.size();
-	code.push_back(0);
+	code.push_back(0x78); size_t loadFail = code.size(); code.push_back(0);
+	movEdx(static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteDllHandle)));
+	code.push_back(0x8B); code.push_back(0x02); storeEax(8);
+	code.push_back(0x85); code.push_back(0xC0);
+	code.push_back(0x74); size_t moduleNull = code.size(); code.push_back(0);
 
-	AppendPushImmediate(code, static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteInitName)));
-	code.push_back(0x50);
-	code.push_back(0xB8);
-	AppendDword(code, static_cast<DWORD>(reinterpret_cast<uintptr_t>(getProcAddress)));
+	// LdrGetProcedureAddress(DllHandle, &Name, 0, &ProcedureAddress)
+	AppendPushImmediate(code, static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteInitAddress)));
+	AppendPushImmediate(code, 0);
+	AppendPushImmediate(code, static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteInitAnsi)));
+	movEdx(static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteDllHandle)));
+	code.push_back(0xFF); code.push_back(0x32);
+	code.push_back(0xB8); AppendDword(code, static_cast<DWORD>(reinterpret_cast<uintptr_t>(ldrGetProcedureAddress)));
 	code.push_back(0xFF); code.push_back(0xD0);
-	movEdx(static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteStatus)));
-	code.push_back(0x89); code.push_back(0x42); code.push_back(0x08);
+	storeEax(12);
 	code.push_back(0x85); code.push_back(0xC0);
-	code.push_back(0x74);
-	size_t exportFailedJump = code.size();
-	code.push_back(0);
-
+	code.push_back(0x78); size_t procFail = code.size(); code.push_back(0);
+	movEdx(static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteInitAddress)));
+	code.push_back(0x8B); code.push_back(0x02); storeEax(16);
+	code.push_back(0x85); code.push_back(0xC0);
+	code.push_back(0x74); size_t procNull = code.size(); code.push_back(0);
 	storeStage(3);
 	code.push_back(0xFF); code.push_back(0xD0);
 	storeStage(4);
-	code.push_back(0xE9);
-	size_t successDisplacement = code.size();
-	AppendDword(code, 0);
+	code.push_back(0xE9); size_t okJump = code.size(); AppendDword(code, 0);
 
-	size_t loadFailed = code.size();
-	storeStage(0xE1);
-	code.push_back(0xE9);
-	size_t loadFailedDisplacement = code.size();
-	AppendDword(code, 0);
+	size_t loadFailLabel = code.size(); storeStage(0xE1);
+	code.push_back(0xE9); size_t loadFailRel = code.size(); AppendDword(code, 0);
+	size_t moduleNullLabel = code.size(); storeStage(0xE3);
+	code.push_back(0xE9); size_t moduleNullRel = code.size(); AppendDword(code, 0);
+	size_t procFailLabel = code.size(); storeStage(0xE2);
+	code.push_back(0xE9); size_t procFailRel = code.size(); AppendDword(code, 0);
+	size_t procNullLabel = code.size(); storeStage(0xE4);
+	code.push_back(0xE9); size_t procNullRel = code.size(); AppendDword(code, 0);
+	size_t resumeLabel = code.size(); appendResume();
 
-	size_t exportFailed = code.size();
-	storeStage(0xE2);
-	code.push_back(0xE9);
-	size_t exportFailedDisplacement = code.size();
-	AppendDword(code, 0);
-
-	size_t entryJump = code.size();
-	// Restore the initial-breakpoint context before continuing execution.
-	code.push_back(0x61); // popad
-	code.push_back(0x9D); // popfd
-	AppendPushImmediate(code, originalEntryPoint);
-	code.push_back(0xC3); // ret
-
-	auto patchRel8 = [&](size_t displacement, size_t target)
-	{
-		int value = static_cast<int>(target) - static_cast<int>(displacement + 1);
-		if( value < -128 || value > 127 ) throw std::exception("bootstrap short jump out of range");
-		code[displacement] = static_cast<BYTE>(static_cast<signed char>(value));
+	auto patch8 = [&](size_t at, size_t to) {
+		int d = static_cast<int>(to) - static_cast<int>(at + 1);
+		if( d < -128 || d > 127 ) throw std::exception("bootstrap short jump out of range");
+		code[at] = static_cast<BYTE>(static_cast<signed char>(d));
 	};
-	auto patchRel32 = [&](size_t displacement, size_t target)
-	{
-		int32_t value = static_cast<int32_t>(target) - static_cast<int32_t>(displacement + 4);
-		for( unsigned int i = 0; i < 4; ++i )
-			code[displacement + i] = static_cast<BYTE>((static_cast<uint32_t>(value) >> (i * 8)) & 0xFF);
+	auto patch32 = [&](size_t at, size_t to) {
+		int32_t d = static_cast<int32_t>(to) - static_cast<int32_t>(at + 4);
+		for( unsigned int i = 0; i < 4; ++i ) code[at+i] = static_cast<BYTE>((static_cast<uint32_t>(d) >> (i*8)) & 0xFF);
 	};
-	patchRel8(loadFailedJump, loadFailed);
-	patchRel8(exportFailedJump, exportFailed);
-	patchRel32(successDisplacement, entryJump);
-	patchRel32(loadFailedDisplacement, entryJump);
-	patchRel32(exportFailedDisplacement, entryJump);
-
+	patch8(loadFail, loadFailLabel); patch8(moduleNull, moduleNullLabel);
+	patch8(procFail, procFailLabel); patch8(procNull, procNullLabel);
+	patch32(okJump, resumeLabel); patch32(loadFailRel, resumeLabel);
+	patch32(moduleNullRel, resumeLabel); patch32(procFailRel, resumeLabel); patch32(procNullRel, resumeLabel);
 	LPVOID remoteCode = process.allocMem(static_cast<DWORD>(code.size()));
 	process.writeMemory(remoteCode, code.data(), static_cast<DWORD>(code.size()));
 	return remoteCode;
 }
-
 
 // The initial system breakpoint is delivered after Windows initializes PEB.Ldr
 // and before the target EXE reaches its entry point.
@@ -458,26 +441,42 @@ int _tmain(int argc, _TCHAR* argv[])
 			DWORD dllPathSize = (_tcslen(dllFullPath) + 1) * sizeof(TCHAR);
 			LPVOID remoteDllPath = process.allocMem(dllPathSize);
 			process.writeMemory(remoteDllPath, dllFullPath, dllPathSize);
+			RemoteUnicodeString32 dllName = {};
+			dllName.length = static_cast<USHORT>(dllPathSize - sizeof(TCHAR));
+			dllName.maximumLength = static_cast<USHORT>(dllPathSize);
+			dllName.buffer = static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteDllPath));
+			LPVOID remoteDllName = process.allocMem(sizeof(dllName));
+			process.writeMemory(remoteDllName, &dllName, sizeof(dllName));
+			DWORD moduleValue = 0;
+			LPVOID remoteDllHandle = process.allocMem(sizeof(moduleValue));
+			process.writeMemory(remoteDllHandle, &moduleValue, sizeof(moduleValue));
+
 			static const char initName[] = "InitializeLeeyesInternalHooks";
 			LPVOID remoteInitName = process.allocMem(sizeof(initName));
 			process.writeMemory(remoteInitName, initName, sizeof(initName));
+			RemoteAnsiString32 initAnsi = {};
+			initAnsi.length = static_cast<USHORT>(sizeof(initName) - 1);
+			initAnsi.maximumLength = static_cast<USHORT>(sizeof(initName));
+			initAnsi.buffer = static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteInitName));
+			LPVOID remoteInitAnsi = process.allocMem(sizeof(initAnsi));
+			process.writeMemory(remoteInitAnsi, &initAnsi, sizeof(initAnsi));
+			DWORD initAddressValue = 0;
+			LPVOID remoteInitAddress = process.allocMem(sizeof(initAddressValue));
+			process.writeMemory(remoteInitAddress, &initAddressValue, sizeof(initAddressValue));
 			RemoteBootstrapStatus initialStatus = {};
 			LPVOID remoteStatus = process.allocMem(sizeof(initialStatus));
 			process.writeMemory(remoteStatus, &initialStatus, sizeof(initialStatus));
 
-			SetLauncherStage(TEXT("resolve_local_loader_apis"));
-			HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
-			FARPROC localLoadLibrary = GetProcAddress(hKernel32, "LoadLibraryW");
-			FARPROC localGetProcAddress = GetProcAddress(hKernel32, "GetProcAddress");
-			if( !localLoadLibrary || !localGetProcAddress )
-				throw std::exception("Could not resolve local Kernel32 loader APIs");
-			SetLauncherStage(TEXT("resolve_remote_loadlibrary"));
-			LPVOID pLoadLibrary = GetRemoteAddressForLocalFunction(
-				process, pInfo.hThread, localLoadLibrary);
-			SetLauncherStage(TEXT("resolve_remote_getprocaddress"));
-			LPVOID pGetProcAddress = GetRemoteAddressForLocalFunction(
-				process, pInfo.hThread, localGetProcAddress);
-
+			SetLauncherStage(TEXT("resolve_local_ntdll_loader_apis"));
+			HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
+			FARPROC localLdrLoadDll = GetProcAddress(hNtdll, "LdrLoadDll");
+			FARPROC localLdrGetProcedureAddress = GetProcAddress(hNtdll, "LdrGetProcedureAddress");
+			if( !localLdrLoadDll || !localLdrGetProcedureAddress )
+				throw std::exception("Could not resolve local ntdll loader APIs");
+			SetLauncherStage(TEXT("resolve_remote_ldrloaddll"));
+			LPVOID pLdrLoadDll = GetRemoteAddressForLocalFunction(process, pInfo.hThread, localLdrLoadDll);
+			SetLauncherStage(TEXT("resolve_remote_ldrgetprocedureaddress"));
+			LPVOID pLdrGetProcedureAddress = GetRemoteAddressForLocalFunction(process, pInfo.hThread, localLdrGetProcedureAddress);
 			// Redirect the still-suspended primary thread through LoadLibraryW before it
 			// reaches Leeyes' real entry point, so every hook - including the Susie image
 			// plugin ones - is installed before Leeyes does its own early plugin-scanning
@@ -512,8 +511,8 @@ int _tmain(int argc, _TCHAR* argv[])
 
 			SetLauncherStage(TEXT("install_initial_breakpoint_bootstrap"));
 			ctx.Eip = reinterpret_cast<DWORD>(CreatePreEntryBootstrap(
-				process, remoteDllPath, remoteStatus, remoteInitName,
-				resumeAddress, pLoadLibrary, pGetProcAddress));
+				process, remoteStatus, remoteDllName, remoteDllHandle, remoteInitAnsi,
+				remoteInitAddress, resumeAddress, pLdrLoadDll, pLdrGetProcedureAddress));
 			if( !SetThreadContext(pInfo.hThread, &ctx) )
 				throw std::runtime_error("SetThreadContext failed while installing initial-breakpoint bootstrap");
 			WriteLauncherDiagnostic(TEXT("bootstrap_installed"));
@@ -533,10 +532,10 @@ int _tmain(int argc, _TCHAR* argv[])
 				throw std::runtime_error(message.str());
 			}
 			WriteLauncherDiagnostic(TEXT("debugger_detached"));
-			WriteLauncherDiagnostic(TEXT("dll_loadlibrary_result"),
-				bootstrapStatus.loadLibraryResult);
-			WriteLauncherDiagnostic(TEXT("dll_initializer_export"),
-				bootstrapStatus.getProcAddressResult);
+			WriteLauncherDiagnostic(TEXT("dll_ldrloaddll_status"), bootstrapStatus.loadLibraryStatus);
+			WriteLauncherDiagnostic(TEXT("dll_loaded_module"), bootstrapStatus.loadedModule);
+			WriteLauncherDiagnostic(TEXT("dll_ldrgetprocedureaddress_status"), bootstrapStatus.getProcAddressStatus);
+			WriteLauncherDiagnostic(TEXT("dll_initializer_export"), bootstrapStatus.initializerAddress);
 			WriteLauncherDiagnostic(
 				bootstrapStatus.stage == 4 ? TEXT("dll_initializer_completed") :
 				TEXT("dll_bootstrap_failed"),
