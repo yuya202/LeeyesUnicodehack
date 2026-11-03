@@ -80,43 +80,100 @@ static void AppendPushImmediate(std::vector<BYTE>& code, DWORD value)
 	AppendDword(code, value);
 }
 
-static LPVOID CreatePreEntryBootstrap(Process& process, LPVOID remoteDllPath,
-	DWORD originalEntryPoint, LPVOID loadLibrary, LPVOID getProcAddress)
+struct RemoteBootstrapStatus
 {
-	static const char initName[] = "InitializeLeeyesInternalHooks";
-	LPVOID remoteInitName = process.allocMem(sizeof(initName));
-	process.writeMemory(remoteInitName, initName, sizeof(initName));
+	DWORD stage;
+	DWORD loadLibraryResult;
+	DWORD getProcAddressResult;
+};
 
+static LPVOID CreatePreEntryBootstrap(Process& process, LPVOID remoteDllPath,
+	LPVOID remoteStatus, LPVOID remoteInitName, DWORD originalEntryPoint,
+	LPVOID loadLibrary, LPVOID getProcAddress)
+{
 	std::vector<BYTE> code;
-	AppendPushImmediate(code, static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteDllPath)));
-	code.push_back(0xB8); // mov eax, LoadLibraryW
-	AppendDword(code, static_cast<DWORD>(reinterpret_cast<uintptr_t>(loadLibrary)));
-	code.push_back(0xFF); code.push_back(0xD0); // call eax
-	code.push_back(0x85); code.push_back(0xC0); // test eax, eax
-	code.push_back(0x74);
-	size_t firstJumpDisplacement = code.size();
-	code.push_back(0);
-	AppendPushImmediate(code, static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteInitName)));
-	code.push_back(0x50); // push the HMODULE returned by LoadLibraryW
-	code.push_back(0xB8); // mov eax, GetProcAddress
-	AppendDword(code, static_cast<DWORD>(reinterpret_cast<uintptr_t>(getProcAddress)));
-	code.push_back(0xFF); code.push_back(0xD0); // call eax
-	code.push_back(0x85); code.push_back(0xC0); // test init export
-	code.push_back(0x74);
-	size_t secondJumpDisplacement = code.size();
-	code.push_back(0);
-	code.push_back(0xFF); code.push_back(0xD0); // call InitializeLeeyesInternalHooks
-	size_t entryJump = code.size();
-	code.push_back(0xBA); // mov edx, original entry point
-	AppendDword(code, originalEntryPoint);
-	code.push_back(0xFF); code.push_back(0xE2); // jmp edx
-
-	for( size_t displacement : { firstJumpDisplacement, secondJumpDisplacement } )
+	auto movEdx = [&](DWORD value)
 	{
-		int value = static_cast<int>(entryJump) - static_cast<int>(displacement + 1);
-		if( value < -128 || value > 127 ) throw std::exception("bootstrap jump out of range");
+		code.push_back(0xBA);
+		AppendDword(code, value);
+	};
+	auto storeStage = [&](DWORD value)
+	{
+		movEdx(static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteStatus)));
+		code.push_back(0xC7); code.push_back(0x02);
+		AppendDword(code, value);
+	};
+	auto jumpToEntry = [&]()
+	{
+		code.push_back(0xBA);
+		AppendDword(code, originalEntryPoint);
+		code.push_back(0xFF); code.push_back(0xE2);
+	};
+
+	storeStage(1);
+	AppendPushImmediate(code, static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteDllPath)));
+	code.push_back(0xB8);
+	AppendDword(code, static_cast<DWORD>(reinterpret_cast<uintptr_t>(loadLibrary)));
+	code.push_back(0xFF); code.push_back(0xD0);
+	movEdx(static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteStatus)));
+	code.push_back(0x89); code.push_back(0x42); code.push_back(0x04);
+	storeStage(2);
+	code.push_back(0x85); code.push_back(0xC0);
+	code.push_back(0x74);
+	size_t loadFailedJump = code.size();
+	code.push_back(0);
+
+	AppendPushImmediate(code, static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteInitName)));
+	code.push_back(0x50);
+	code.push_back(0xB8);
+	AppendDword(code, static_cast<DWORD>(reinterpret_cast<uintptr_t>(getProcAddress)));
+	code.push_back(0xFF); code.push_back(0xD0);
+	movEdx(static_cast<DWORD>(reinterpret_cast<uintptr_t>(remoteStatus)));
+	code.push_back(0x89); code.push_back(0x42); code.push_back(0x08);
+	code.push_back(0x85); code.push_back(0xC0);
+	code.push_back(0x74);
+	size_t exportFailedJump = code.size();
+	code.push_back(0);
+
+	storeStage(3);
+	code.push_back(0xFF); code.push_back(0xD0);
+	storeStage(4);
+	code.push_back(0xE9);
+	size_t successDisplacement = code.size();
+	AppendDword(code, 0);
+
+	size_t loadFailed = code.size();
+	storeStage(0xE1);
+	code.push_back(0xE9);
+	size_t loadFailedDisplacement = code.size();
+	AppendDword(code, 0);
+
+	size_t exportFailed = code.size();
+	storeStage(0xE2);
+	code.push_back(0xE9);
+	size_t exportFailedDisplacement = code.size();
+	AppendDword(code, 0);
+
+	size_t entryJump = code.size();
+	jumpToEntry();
+
+	auto patchRel8 = [&](size_t displacement, size_t target)
+	{
+		int value = static_cast<int>(target) - static_cast<int>(displacement + 1);
+		if( value < -128 || value > 127 ) throw std::exception("bootstrap short jump out of range");
 		code[displacement] = static_cast<BYTE>(static_cast<signed char>(value));
-	}
+	};
+	auto patchRel32 = [&](size_t displacement, size_t target)
+	{
+		int32_t value = static_cast<int32_t>(target) - static_cast<int32_t>(displacement + 4);
+		for( unsigned int i = 0; i < 4; ++i )
+			code[displacement + i] = static_cast<BYTE>((static_cast<uint32_t>(value) >> (i * 8)) & 0xFF);
+	};
+	patchRel8(loadFailedJump, loadFailed);
+	patchRel8(exportFailedJump, exportFailed);
+	patchRel32(successDisplacement, entryJump);
+	patchRel32(loadFailedDisplacement, entryJump);
+	patchRel32(exportFailedDisplacement, entryJump);
 
 	LPVOID remoteCode = process.allocMem(static_cast<DWORD>(code.size()));
 	process.writeMemory(remoteCode, code.data(), static_cast<DWORD>(code.size()));
@@ -190,6 +247,12 @@ int _tmain(int argc, _TCHAR* argv[])
 			DWORD dllPathSize = (_tcslen(dllFullPath) + 1) * sizeof(TCHAR);
 			LPVOID remoteDllPath = process.allocMem(dllPathSize);
 			process.writeMemory(remoteDllPath, dllFullPath, dllPathSize);
+			static const char initName[] = "InitializeLeeyesInternalHooks";
+			LPVOID remoteInitName = process.allocMem(sizeof(initName));
+			process.writeMemory(remoteInitName, initName, sizeof(initName));
+			RemoteBootstrapStatus initialStatus = {};
+			LPVOID remoteStatus = process.allocMem(sizeof(initialStatus));
+			process.writeMemory(remoteStatus, &initialStatus, sizeof(initialStatus));
 
 			HMODULE hKernel32 = GetModuleHandle(TEXT("kernel32.dll"));
 			LPVOID pLoadLibrary = (LPVOID)GetProcAddress(hKernel32, "LoadLibraryW");
@@ -223,12 +286,34 @@ int _tmain(int argc, _TCHAR* argv[])
 			// exported internal-hook initializer runs outside loader lock. The stub
 			// then jumps to the original entry point without changing its startup stack.
 			ctx.Eip = reinterpret_cast<DWORD>(CreatePreEntryBootstrap(
-				process, remoteDllPath, originalEntryPoint, pLoadLibrary, pGetProcAddress));
+				process, remoteDllPath, remoteStatus, remoteInitName,
+				originalEntryPoint, pLoadLibrary, pGetProcAddress));
 			if (!SetThreadContext(pInfo.hThread, &ctx)) throw std::exception("SetThreadContext failed");
 			WriteLauncherDiagnostic(TEXT("bootstrap_installed"));
 
 			ResumeThread(pInfo.hThread);
 			WriteLauncherDiagnostic(TEXT("primary_thread_resumed"));
+
+			// Resuming the primary thread is not proof that LoadLibrary succeeded.
+			// Read the bootstrap's explicit status from the target process.
+			const ULONGLONG injectionWaitStarted = GetTickCount64();
+			RemoteBootstrapStatus bootstrapStatus = {};
+			for(;;)
+			{
+				process.readMemory(remoteStatus, &bootstrapStatus, sizeof(bootstrapStatus));
+				if( bootstrapStatus.stage == 4 || bootstrapStatus.stage >= 0xE0 ) break;
+				if( WaitForSingleObject(pInfo.hProcess, 0) == WAIT_OBJECT_0 )
+					throw std::exception("Leeyes exited during DLL bootstrap");
+				if( GetTickCount64() - injectionWaitStarted >= 30000 )
+					throw std::exception("DLL bootstrap did not report completion within 30 seconds");
+				Sleep(10);
+			}
+			WriteLauncherDiagnostic(
+				bootstrapStatus.stage == 4 ? TEXT("dll_initializer_completed") :
+				TEXT("dll_bootstrap_failed"),
+				bootstrapStatus.stage);
+			if( bootstrapStatus.stage != 4 )
+				throw std::exception("DLL load or internal-hook initializer failed");
 
 			if( option )
 			{
