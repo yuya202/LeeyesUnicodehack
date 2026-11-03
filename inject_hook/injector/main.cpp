@@ -68,6 +68,30 @@ HWND GetWindowHandle(	const DWORD TargetID)
 	return context.result;
 }
 
+static const TCHAR* gLauncherStage = TEXT("startup");
+
+static void SetLauncherStage(const TCHAR* stage)
+{
+	gLauncherStage = stage ? stage : TEXT("unknown");
+	WriteLauncherDiagnostic(gLauncherStage);
+}
+
+static void WriteLauncherException(const TCHAR* stage, const char* message)
+{
+	WriteLauncherDiagnostic(stage);
+	TCHAR logPath[MAX_PATH] = {};
+	DWORD n = ::GetModuleFileName(NULL, logPath, _countof(logPath));
+	if( n == 0 || n >= _countof(logPath) ) return;
+	TCHAR* slash = _tcsrchr(logPath, TEXT('\\'));
+	if( !slash ) slash = _tcsrchr(logPath, TEXT('/'));
+	if( !slash ) return;
+	_tcscpy_s(slash + 1, _countof(logPath) - (size_t)(slash + 1 - logPath), TEXT("_injector_debug.txt"));
+	FILE* f = nullptr;
+	if( _tfopen_s(&f, logPath, TEXT("a")) != 0 || !f ) return;
+	_ftprintf(f, TEXT("exception_stage=%s\\nexception_message=%hs\\n"), stage, message ? message : "(null)");
+	fclose(f);
+}
+
 static void AppendDword(std::vector<BYTE>& code, DWORD value)
 {
 	for( unsigned int shift = 0; shift < 32; shift += 8 )
@@ -86,13 +110,16 @@ struct RemoteUnicodeString32 { USHORT length; USHORT maximumLength; DWORD buffer
 static LPVOID GetRemoteAddressForLocalFunction(Process& process, HANDLE primaryThread,
 	FARPROC localFunction)
 {
+	SetLauncherStage(TEXT("resolve_api_local_owner"));
 	if( !localFunction ) throw std::exception("Local API address is null");
 	HMODULE localOwner = nullptr;
+	SetLauncherStage(TEXT("resolve_api_get_local_module"));
 	if( !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
 		| GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 		reinterpret_cast<LPCWSTR>(localFunction), &localOwner) )
 		throw std::exception("GetModuleHandleExW failed for system API");
 	WCHAR modulePath[MAX_PATH] = {};
+	SetLauncherStage(TEXT("resolve_api_get_module_path"));
 	if( !GetModuleFileNameW(localOwner, modulePath, _countof(modulePath)) )
 		throw std::exception("GetModuleFileNameW failed for system API");
 	const WCHAR* moduleName = wcsrchr(modulePath, L'\\');
@@ -100,20 +127,25 @@ static LPVOID GetRemoteAddressForLocalFunction(Process& process, HANDLE primaryT
 
 	CONTEXT context = {};
 	context.ContextFlags = CONTEXT_SEGMENTS;
+	SetLauncherStage(TEXT("resolve_api_get_thread_context"));
 	if( !GetThreadContext(primaryThread, &context) )
 		throw std::exception("GetThreadContext failed while resolving remote module");
 	LDT_ENTRY fsEntry = {};
+	SetLauncherStage(TEXT("resolve_api_get_fs_selector"));
 	if( !GetThreadSelectorEntry(primaryThread, context.SegFs, &fsEntry) )
 		throw std::exception("GetThreadSelectorEntry failed while resolving remote module");
 	DWORD fsBase = (static_cast<DWORD>(fsEntry.HighWord.Bytes.BaseHi) << 24)
 		| (static_cast<DWORD>(fsEntry.HighWord.Bytes.BaseMid) << 16)
 		| fsEntry.BaseLow;
 	DWORD peb = 0;
+	SetLauncherStage(TEXT("resolve_api_read_peb_pointer"));
 	process.readMemory(reinterpret_cast<LPVOID>(fsBase + 0x30), &peb, sizeof(peb));
 	DWORD ldr = 0;
+	SetLauncherStage(TEXT("resolve_api_read_peb_ldr"));
 	process.readMemory(reinterpret_cast<LPVOID>(peb + 0x0C), &ldr, sizeof(ldr));
 	if( !ldr ) throw std::exception("Remote PEB loader data is not initialized");
 
+	SetLauncherStage(TEXT("resolve_api_read_loader_list"));
 	const DWORD listHead = ldr + 0x14;
 	RemoteListEntry32 head = {};
 	process.readMemory(reinterpret_cast<LPVOID>(listHead), &head, sizeof(head));
@@ -306,8 +338,10 @@ int _tmain(int argc, _TCHAR* argv[])
 		WriteLauncherDiagnostic(TEXT("create_process_ok"));
 		try
 		{
+			SetLauncherStage(TEXT("open_target_process"));
 			Process process(pInfo.dwProcessId);
 
+			SetLauncherStage(TEXT("allocate_remote_arguments"));
 			DWORD dllPathSize = (_tcslen(dllFullPath) + 1) * sizeof(TCHAR);
 			LPVOID remoteDllPath = process.allocMem(dllPathSize);
 			process.writeMemory(remoteDllPath, dllFullPath, dllPathSize);
@@ -318,13 +352,16 @@ int _tmain(int argc, _TCHAR* argv[])
 			LPVOID remoteStatus = process.allocMem(sizeof(initialStatus));
 			process.writeMemory(remoteStatus, &initialStatus, sizeof(initialStatus));
 
+			SetLauncherStage(TEXT("resolve_local_loader_apis"));
 			HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
 			FARPROC localLoadLibrary = GetProcAddress(hKernel32, "LoadLibraryW");
 			FARPROC localGetProcAddress = GetProcAddress(hKernel32, "GetProcAddress");
 			if( !localLoadLibrary || !localGetProcAddress )
 				throw std::exception("Could not resolve local Kernel32 loader APIs");
+			SetLauncherStage(TEXT("resolve_remote_loadlibrary"));
 			LPVOID pLoadLibrary = GetRemoteAddressForLocalFunction(
 				process, pInfo.hThread, localLoadLibrary);
+			SetLauncherStage(TEXT("resolve_remote_getprocaddress"));
 			LPVOID pGetProcAddress = GetRemoteAddressForLocalFunction(
 				process, pInfo.hThread, localGetProcAddress);
 
@@ -338,6 +375,7 @@ int _tmain(int argc, _TCHAR* argv[])
 			// independently (inject_dll.dll blocks p9np.dll's own load and hides P9NP from
 			// this process's view of the network provider list), so this ordering is safe
 			// again and lets hooks cover Leeyes' full startup sequence.
+			SetLauncherStage(TEXT("read_target_image_base"));
 			uintptr_t imageBase = process.getImageBase(pInfo.hThread);
 			IMAGE_DOS_HEADER dosHeader;
 			process.readMemory((LPVOID)imageBase, &dosHeader, sizeof(dosHeader));
@@ -345,6 +383,7 @@ int _tmain(int argc, _TCHAR* argv[])
 			process.readMemory((LPVOID)(imageBase + dosHeader.e_lfanew), &ntHeaders, sizeof(ntHeaders));
 			DWORD originalEntryPoint = (DWORD)(imageBase + ntHeaders.OptionalHeader.AddressOfEntryPoint);
 
+			SetLauncherStage(TEXT("read_target_entry_context"));
 			CONTEXT ctx = {};
 			ctx.ContextFlags = CONTEXT_CONTROL;
 			if (!GetThreadContext(pInfo.hThread, &ctx)) throw std::exception("GetThreadContext failed");
@@ -352,11 +391,13 @@ int _tmain(int argc, _TCHAR* argv[])
 			// Keep the primary thread suspended while LoadLibraryW returns and the
 			// exported internal-hook initializer runs outside loader lock. The stub
 			// then jumps to the original entry point without changing its startup stack.
+			SetLauncherStage(TEXT("install_pre_entry_bootstrap"));
 			ctx.Eip = reinterpret_cast<DWORD>(CreatePreEntryBootstrap(
 				process, remoteDllPath, remoteStatus, remoteInitName,
 				originalEntryPoint, pLoadLibrary, pGetProcAddress));
 			if (!SetThreadContext(pInfo.hThread, &ctx)) throw std::exception("SetThreadContext failed");
 			WriteLauncherDiagnostic(TEXT("bootstrap_installed"));
+			SetLauncherStage(TEXT("resume_and_wait_for_dll_bootstrap"));
 
 			ResumeThread(pInfo.hThread);
 			WriteLauncherDiagnostic(TEXT("primary_thread_resumed"));
@@ -503,7 +544,7 @@ int _tmain(int argc, _TCHAR* argv[])
 		}
 		catch (std::exception& e)
 		{
-			WriteLauncherDiagnostic(TEXT("injector_exception"));
+			WriteLauncherException(gLauncherStage, e.what());
 			std::cout << "Error while trying to inject dll into process: " << e.what() << std::endl;
 			ResumeThread(pInfo.hThread);
 			CloseHandle(pInfo.hThread);
