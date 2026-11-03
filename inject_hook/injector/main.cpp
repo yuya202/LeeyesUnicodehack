@@ -80,6 +80,70 @@ static void AppendPushImmediate(std::vector<BYTE>& code, DWORD value)
 	AppendDword(code, value);
 }
 
+struct RemoteListEntry32 { DWORD flink; DWORD blink; };
+struct RemoteUnicodeString32 { USHORT length; USHORT maximumLength; DWORD buffer; };
+
+static LPVOID GetRemoteAddressForLocalFunction(Process& process, HANDLE primaryThread,
+	FARPROC localFunction)
+{
+	if( !localFunction ) throw std::exception("Local API address is null");
+	HMODULE localOwner = nullptr;
+	if( !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+		| GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+		reinterpret_cast<LPCWSTR>(localFunction), &localOwner) )
+		throw std::exception("GetModuleHandleExW failed for system API");
+	WCHAR modulePath[MAX_PATH] = {};
+	if( !GetModuleFileNameW(localOwner, modulePath, _countof(modulePath)) )
+		throw std::exception("GetModuleFileNameW failed for system API");
+	const WCHAR* moduleName = wcsrchr(modulePath, L'\\');
+	moduleName = moduleName ? moduleName + 1 : modulePath;
+
+	CONTEXT context = {};
+	context.ContextFlags = CONTEXT_SEGMENTS;
+	if( !GetThreadContext(primaryThread, &context) )
+		throw std::exception("GetThreadContext failed while resolving remote module");
+	LDT_ENTRY fsEntry = {};
+	if( !GetThreadSelectorEntry(primaryThread, context.SegFs, &fsEntry) )
+		throw std::exception("GetThreadSelectorEntry failed while resolving remote module");
+	DWORD fsBase = (static_cast<DWORD>(fsEntry.HighWord.Bytes.BaseHi) << 24)
+		| (static_cast<DWORD>(fsEntry.HighWord.Bytes.BaseMid) << 16)
+		| fsEntry.BaseLow;
+	DWORD peb = 0;
+	process.readMemory(reinterpret_cast<LPVOID>(fsBase + 0x30), &peb, sizeof(peb));
+	DWORD ldr = 0;
+	process.readMemory(reinterpret_cast<LPVOID>(peb + 0x0C), &ldr, sizeof(ldr));
+	if( !ldr ) throw std::exception("Remote PEB loader data is not initialized");
+
+	const DWORD listHead = ldr + 0x14;
+	RemoteListEntry32 head = {};
+	process.readMemory(reinterpret_cast<LPVOID>(listHead), &head, sizeof(head));
+	DWORD link = head.flink;
+	for( unsigned int count = 0; link && link != listHead && count < 256; ++count )
+	{
+		const DWORD entry = link - 0x08;
+		DWORD remoteBase = 0;
+		process.readMemory(reinterpret_cast<LPVOID>(entry + 0x18), &remoteBase, sizeof(remoteBase));
+		RemoteUnicodeString32 baseName = {};
+		process.readMemory(reinterpret_cast<LPVOID>(entry + 0x2C), &baseName, sizeof(baseName));
+		if( remoteBase && baseName.buffer && baseName.length >= sizeof(WCHAR)
+			&& baseName.length <= MAX_PATH * sizeof(WCHAR) )
+		{
+			std::vector<WCHAR> name(baseName.length / sizeof(WCHAR) + 1, L'\\0');
+			process.readMemory(reinterpret_cast<LPVOID>(baseName.buffer), name.data(), baseName.length);
+			if( _wcsicmp(name.data(), moduleName) == 0 )
+			{
+				const uintptr_t rva = reinterpret_cast<uintptr_t>(localFunction)
+					- reinterpret_cast<uintptr_t>(localOwner);
+				return reinterpret_cast<LPVOID>(static_cast<uintptr_t>(remoteBase) + rva);
+			}
+		}
+		RemoteListEntry32 current = {};
+		process.readMemory(reinterpret_cast<LPVOID>(link), &current, sizeof(current));
+		link = current.flink;
+	}
+	throw std::exception("Could not locate API owner module in Leeyes PEB loader list");
+}
+
 struct RemoteBootstrapStatus
 {
 	DWORD stage;
@@ -254,9 +318,15 @@ int _tmain(int argc, _TCHAR* argv[])
 			LPVOID remoteStatus = process.allocMem(sizeof(initialStatus));
 			process.writeMemory(remoteStatus, &initialStatus, sizeof(initialStatus));
 
-			HMODULE hKernel32 = GetModuleHandle(TEXT("kernel32.dll"));
-			LPVOID pLoadLibrary = (LPVOID)GetProcAddress(hKernel32, "LoadLibraryW");
-			if (!pLoadLibrary) throw std::exception("Cant Resolve LoadLibraryW");
+			HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
+			FARPROC localLoadLibrary = GetProcAddress(hKernel32, "LoadLibraryW");
+			FARPROC localGetProcAddress = GetProcAddress(hKernel32, "GetProcAddress");
+			if( !localLoadLibrary || !localGetProcAddress )
+				throw std::exception("Could not resolve local Kernel32 loader APIs");
+			LPVOID pLoadLibrary = GetRemoteAddressForLocalFunction(
+				process, pInfo.hThread, localLoadLibrary);
+			LPVOID pGetProcAddress = GetRemoteAddressForLocalFunction(
+				process, pInfo.hThread, localGetProcAddress);
 
 			// Redirect the still-suspended primary thread through LoadLibraryW before it
 			// reaches Leeyes' real entry point, so every hook - including the Susie image
@@ -279,9 +349,6 @@ int _tmain(int argc, _TCHAR* argv[])
 			ctx.ContextFlags = CONTEXT_CONTROL;
 			if (!GetThreadContext(pInfo.hThread, &ctx)) throw std::exception("GetThreadContext failed");
 
-			LPVOID pGetProcAddress = reinterpret_cast<LPVOID>(GetProcAddress(
-				hKernel32, "GetProcAddress"));
-			if( !pGetProcAddress ) throw std::exception("Cant Resolve GetProcAddress");
 			// Keep the primary thread suspended while LoadLibraryW returns and the
 			// exported internal-hook initializer runs outside loader lock. The stub
 			// then jumps to the original entry point without changing its startup stack.
