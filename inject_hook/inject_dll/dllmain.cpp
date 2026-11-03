@@ -1964,6 +1964,33 @@ void LogSyntheticArchiveFileAccessW(const char* api, LPCWSTR input,
 		sizeof(inputUtf8), nullptr, nullptr);
 	LogSyntheticArchiveFileAccess(api, inputUtf8, resolved, mapped, result, lastError);
 }
+
+void LogSyntheticArchiveAttributeAccess(const char* api, const char* input,
+	const std::wstring& resolved, bool mapped, DWORD attributes, DWORD lastError)
+{
+	if( !input || !Utility::HasSyntheticAlias(input) ) return;
+	FILE* lf = nullptr;
+	if( !Utility::OpenDebugLog(&lf) ) return;
+	char resolvedUtf8[MAX_PATH * 4] = {};
+	if( !resolved.empty() )
+		::WideCharToMultiByte(CP_UTF8, 0, resolved.c_str(), -1,
+			resolvedUtf8, sizeof(resolvedUtf8), nullptr, nullptr);
+	fprintf(lf, "archive_file_api api=%s input=[%s] mapped=%d resolved_utf8=[%s] result=%s attributes=0x%08lX last_error=%lu\\n",
+		api ? api : "?", input, mapped ? 1 : 0, resolvedUtf8,
+		attributes != INVALID_FILE_ATTRIBUTES ? "SUCCESS" : "FAIL",
+		(unsigned long)attributes, (unsigned long)lastError);
+	fclose(lf);
+}
+
+void LogSyntheticArchiveAttributeAccessW(const char* api, LPCWSTR input,
+	const std::wstring& resolved, bool mapped, DWORD attributes, DWORD lastError)
+{
+	if( !input || !wcsstr(input, L"\\~u") ) return;
+	char inputUtf8[MAX_PATH * 4] = {};
+	::WideCharToMultiByte(CP_UTF8, 0, input, -1, inputUtf8,
+		sizeof(inputUtf8), nullptr, nullptr);
+	LogSyntheticArchiveAttributeAccess(api, inputUtf8, resolved, mapped, attributes, lastError);
+}
 #endif
 
 bool IsExtendedAnsiPath( LPCSTR path )
@@ -2168,6 +2195,15 @@ DWORD WINAPI GetFileAttributesWHook( LPCWSTR lpFileName )
 	if( ret == INVALID_FILE_ATTRIBUTES && lpFileName
 		&& Utility::ResolveWidePathCollision(lpFileName, resolved) )
 		ret = Utility::GetFileAttributesWLong(resolved);
+#if UNICODEHACK_PLUGIN_DEBUG
+	if( lpFileName && wcsstr(lpFileName, L"\\~u") )
+	{
+		DWORD diagnosticError = ::GetLastError();
+		LogSyntheticArchiveAttributeAccessW("GetFileAttributesW", lpFileName,
+			resolved, !resolved.empty(), ret, diagnosticError);
+		::SetLastError(diagnosticError);
+	}
+#endif
 	return ret;
 }
 void hookGetFileAttributesW()
@@ -2186,6 +2222,15 @@ BOOL WINAPI GetFileAttributesExWHook( LPCWSTR lpFileName, GET_FILEEX_INFO_LEVELS
 	if( !ret && lpFileName
 		&& Utility::ResolveWidePathCollision(lpFileName, resolved) )
 		ret = Utility::GetFileAttributesExWLong(resolved, fInfoLevelId, lpFileInformation);
+#if UNICODEHACK_PLUGIN_DEBUG
+	if( lpFileName && wcsstr(lpFileName, L"\\~u") )
+	{
+		DWORD diagnosticError = ::GetLastError();
+		LogSyntheticArchiveAttributeAccessW("GetFileAttributesExW", lpFileName,
+			resolved, !resolved.empty(), ret ? 0 : INVALID_FILE_ATTRIBUTES, diagnosticError);
+		::SetLastError(diagnosticError);
+	}
+#endif
 	return ret;
 }
 void hookGetFileAttributesExW()
@@ -2221,6 +2266,15 @@ HANDLE WINAPI CreateFile2Hook(LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD d
 		&& Utility::ResolveWidePathCollision(lpFileName, resolved) )
 		ret = CreateFile2ResolvedPath(resolved, dwDesiredAccess, dwShareMode,
 			dwCreationDisposition, pCreateExParams);
+#if UNICODEHACK_PLUGIN_DEBUG
+	if( lpFileName && wcsstr(lpFileName, L"\\~u") )
+	{
+		DWORD diagnosticError = ::GetLastError();
+		LogSyntheticArchiveFileAccessW("CreateFile2", lpFileName,
+			resolved, !resolved.empty(), ret, diagnosticError);
+		::SetLastError(diagnosticError);
+	}
+#endif
 #if UNICODEHACK_PATH_DEBUG
 	{
 		FILE* lf = nullptr;
@@ -2304,6 +2358,15 @@ DWORD WINAPI GetFileAttributesAHook( LPCSTR lpFileName )
 		}
 #endif
 	}
+#if UNICODEHACK_PLUGIN_DEBUG
+	if( hasSyntheticAlias )
+	{
+		DWORD diagnosticError = ::GetLastError();
+		LogSyntheticArchiveAttributeAccess("GetFileAttributesA", pathForWideResolution,
+			resolvedWide, !resolvedWide.empty(), ret, diagnosticError);
+		::SetLastError(diagnosticError);
+	}
+#endif
 	return ret;
 }
 void hookGetFileAttributesA()
@@ -2359,6 +2422,15 @@ BOOL WINAPI GetFileAttributesExAHook( LPCSTR lpFileName, GET_FILEEX_INFO_LEVELS 
 		}
 		ret = Utility::GetFileAttributesExWLong( resolvedWide, fInfoLevelId, lpFileInformation );
 	}
+#if UNICODEHACK_PLUGIN_DEBUG
+	if( hasSyntheticAlias )
+	{
+		DWORD diagnosticError = ::GetLastError();
+		LogSyntheticArchiveAttributeAccess("GetFileAttributesExA", pathForWideResolution,
+			resolvedWide, !resolvedWide.empty(), ret ? 0 : INVALID_FILE_ATTRIBUTES, diagnosticError);
+		::SetLastError(diagnosticError);
+	}
+#endif
 	return ret;
 }
 void hookGetFileAttributesExA()
