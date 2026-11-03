@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - diagnose-archive-empty-listing
+      - diagnose-archive-empty-listing-v8-ntdll-loader
 
 permissions:
   contents: read
@@ -18,7 +18,7 @@ jobs:
       - name: Checkout diagnostic branch
         uses: actions/checkout@v4
         with:
-          ref: diagnose-archive-empty-listing
+          ref: diagnose-archive-empty-listing-v8-ntdll-loader
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
@@ -83,8 +83,8 @@ jobs:
               "Repository commit: $env:GITHUB_SHA"
               "Built at (UTC): $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss'))"
               'Configuration: Release | Win32 (x86) | Archive diagnostics enabled'
-              'Diagnostic build: launcher waits for the initial Windows debugger breakpoint after PEB.Ldr initialization, injects before the Leeyes EXE entry point, pumps DLL-load debug events, and records injection errors.'
-              'The launcher injects at the initial Windows system breakpoint after loader initialization and before the Leeyes EXE entry point.'
+              'Diagnostic build: launcher waits for the initial Windows debugger breakpoint, resolves loader functions from ntdll.dll, calls LdrLoadDll and LdrGetProcedureAddress in the target process, initializes hooks before the Leeyes EXE entry point, and records NTSTATUS values.'
+              'The launcher uses ntdll.dll loader APIs at the initial Windows system breakpoint, before the Leeyes EXE entry point.'
               'LeeyesW.exe is not included or used.'
               'Included: inject_dll.dll, LeeyesDiagLauncher.exe, inject_dll.ini, test instructions, build info, and hashes.'
               'Overlay package: extract all ZIP contents directly into the existing Leeyes folder that contains Leeyes.exe. No manual file-by-file copying is needed.'
@@ -95,7 +95,7 @@ jobs:
               'Leeyes Unicode Hack - Archive Diagnostics test instructions'
               ''
               'IMPORTANT: Double-clicking Leeyes.exe directly does not load the diagnostic DLL.'
-              'LeeyesDiagLauncher.exe starts the EXISTING standard Leeyes.exe under DEBUG_ONLY_THIS_PROCESS, waits for the initial system breakpoint after loader initialization but before the Leeyes EXE entry point, injects and initializes inject_dll.dll, pumps debug events during bootstrap, then detaches.'
+              'LeeyesDiagLauncher.exe starts the EXISTING standard Leeyes.exe under DEBUG_ONLY_THIS_PROCESS, waits for the initial system breakpoint, then calls ntdll.dll LdrLoadDll and LdrGetProcedureAddress in the target process to load and initialize inject_dll.dll before the Leeyes EXE entry point.'
               'The running application process is Leeyes.exe. LeeyesW.exe is NOT included and must NOT be used.'
               ''
               '1. Close every running Leeyes.exe and LeeyesDiagLauncher.exe process.'
@@ -103,7 +103,7 @@ jobs:
               '3. Double-click LeeyesDiagLauncher.exe from that same folder. Wait for the normal Leeyes.exe window to appear.'
               '4. Reproduce the archive-listing failure using the specified ZIP.'
               '5. Close Leeyes normally. Send back _injector_debug.txt and _path_debug.txt from the Leeyes folder.'
-              '6. The injector log now records the exact stage, exception message, remote LoadLibraryW result, initializer export address, and initializer completion. If a runtime error occurs, do not repeatedly retry.'
+              '6. The injector log now records the exact stage, exception message, remote LdrLoadDll/LdrGetProcedureAddress NTSTATUS values, loaded module address, initializer export address, and initializer completion. If a runtime error occurs, do not repeatedly retry.'
               ''
               'Do not replace or modify Leeyes.exe. Do not launch any LeeyesW.exe left over from an older test.'
           ) | Set-Content -LiteralPath '.\Leeyes\TEST-INSTRUCTIONS.txt' -Encoding utf8
@@ -117,13 +117,13 @@ jobs:
               }
           $hashes | Set-Content -LiteralPath '.\Leeyes\SHA256SUMS.txt' -Encoding ascii
 
-          Compress-Archive -Path '.\Leeyes\inject_dll.dll', '.\Leeyes\LeeyesDiagLauncher.exe', '.\Leeyes\inject_dll.ini', '.\Leeyes\BUILD-INFO.txt', '.\Leeyes\TEST-INSTRUCTIONS.txt', '.\Leeyes\SHA256SUMS.txt' -DestinationPath '.\dist\LeeyesUnicodeHack_ArchiveDiagnostics_20261103_v7.zip' -Force
+          Compress-Archive -Path '.\Leeyes\inject_dll.dll', '.\Leeyes\LeeyesDiagLauncher.exe', '.\Leeyes\inject_dll.ini', '.\Leeyes\BUILD-INFO.txt', '.\Leeyes\TEST-INSTRUCTIONS.txt', '.\Leeyes\SHA256SUMS.txt' -DestinationPath '.\dist\LeeyesUnicodeHack_ArchiveDiagnostics_20261103_v8.zip' -Force
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LeeyesUnicodeHack-ArchiveDiagnostics-20261103-v7
-          path: dist/LeeyesUnicodeHack_ArchiveDiagnostics_20261103_v7.zip
+          name: LeeyesUnicodeHack-ArchiveDiagnostics-20261103-v8
+          path: dist/LeeyesUnicodeHack_ArchiveDiagnostics_20261103_v8.zip
           if-no-files-found: error
           retention-days: 14
 
