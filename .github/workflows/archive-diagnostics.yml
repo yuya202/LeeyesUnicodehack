@@ -117,7 +117,7 @@ jobs:
               }
           $hashes | Set-Content -LiteralPath '.\Leeyes\SHA256SUMS.txt' -Encoding ascii
 
-          Compress-Archive -Path '.\Leeyes\inject_dll.dll', '.\Leeyes\LeeyesDiagLauncher.exe', '.\Leeyes\inject_dll.ini', '.\Leeyes\BUILD-INFO.txt', '.\Leeyes\TEST-INSTRUCTIONS.txt', '.\Leeyes\SHA256SUMS.txt' -DestinationPath '.\dist\LeeyesUnicodeHack_ArchiveDiagnostics.zip' -Force
+          Compress-Archive -Path '.\Leeyes\inject_dll.dll', '.\Leeyes\LeeyesDiagLauncher.exe', '.\Leeyes\inject_dll.ini', '.\Leeyes\BUILD-INFO.txt', '.\Leeyes\TEST-INSTRUCTIONS.txt', '.\Leeyes\SHA256SUMS.txt' -DestinationPath '.\dist\LeeyesUnicodeHack_ArchiveDiagnostics_20261103_v7.zip' -Force
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
