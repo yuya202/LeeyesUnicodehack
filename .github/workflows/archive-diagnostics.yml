@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - diagnose-archive-empty-listing-v12-enable-diagnostics
+      - diagnose-archive-empty-listing-v11-enable-diagnostics
 
 permissions:
   contents: read
@@ -18,7 +18,7 @@ jobs:
       - name: Checkout diagnostic branch
         uses: actions/checkout@v4
         with:
-          ref: diagnose-archive-empty-listing-v12-enable-diagnostics
+          ref: diagnose-archive-empty-listing-v11-enable-diagnostics
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
