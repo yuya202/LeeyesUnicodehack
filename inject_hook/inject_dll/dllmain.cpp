@@ -5226,7 +5226,7 @@ static void WriteDllAttachDiagnostic(const char* stage)
 	FILE* log = nullptr;
 	if( Utility::OpenDebugLog(&log) )
 	{
-		fprintf(log, "dll_attach_stage=%s module=%p\\n", stage ? stage : "unknown", gInjectedModule);
+		fprintf(log, "dll_attach_stage=%s module=%p\n", stage ? stage : "unknown", gInjectedModule);
 		fclose(log);
 	}
 }
