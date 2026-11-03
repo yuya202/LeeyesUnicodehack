@@ -5212,6 +5212,18 @@ LONG WINAPI VectoredHandler(PEXCEPTION_POINTERS info)
 }
 }
 
+#if UNICODEHACK_PLUGIN_DEBUG
+static void WriteDllAttachDiagnostic(const char* stage)
+{
+	FILE* log = nullptr;
+	if( Utility::OpenDebugLog(&log) )
+	{
+		fprintf(log, "dll_attach_stage=%s module=%p\\n", stage ? stage : "unknown", gInjectedModule);
+		fclose(log);
+	}
+}
+#endif
+
 BOOL APIENTRY DllMain( HMODULE hModule,
                        DWORD  ul_reason_for_call,
                        LPVOID lpReserved
@@ -5222,11 +5234,20 @@ BOOL APIENTRY DllMain( HMODULE hModule,
 	{
 	case DLL_PROCESS_ATTACH:
 		gInjectedModule = hModule;
+		#if UNICODEHACK_PLUGIN_DEBUG
+		// Force the diagnostic log before installing any hooks. If an early hook
+		// setup fails under the loader lock, the log must still prove DllMain entry.
+		Utility::gDebugLogEnabled = true;
+		WriteDllAttachDiagnostic("process_attach_entered");
+		#endif
 		// install first, before anything else has a chance to trigger p9np's load
 		Kernel32::hookLoadLibrary();
 		Kernel32::hookLdrLoadDll();
 		Kernel32::hookRegQueryValueExW();
 		Kernel32::hookPathConversions();
+		#if UNICODEHACK_PLUGIN_DEBUG
+		WriteDllAttachDiagnostic("early_kernel_hooks_installed");
+		#endif
 		AddVectoredExceptionHandler(1, Diagnostics::VectoredHandler);
 		std::set_terminate(Diagnostics::OnTerminate);
 		signal(SIGABRT, Diagnostics::OnAbort);
@@ -5241,18 +5262,10 @@ BOOL APIENTRY DllMain( HMODULE hModule,
 			Utility::gDebugLogEnabled = Profile->Get("Debug", "DebugLog", UINT()) != 0;
 		#endif
 		#if UNICODEHACK_PLUGIN_DEBUG
-			// Diagnostic builds must prove that the injected DLL loaded even if
-			// the INI parser does not recognize the Debug section or no archive
-			// plug-in entry point is reached. Force logging on and write a startup
-			// marker beside the DLL; normal builds are unaffected.
+			// Keep forced logging enabled even when the INI parser does not
+			// recognize the Debug section. Entry was already logged before hooks.
 			Utility::gDebugLogEnabled = true;
-			FILE* startupLog = nullptr;
-			if( Utility::OpenDebugLog(&startupLog) )
-			{
-				fprintf(startupLog, "diagnostic startup: module=%p ini DebugLog=%u\\n",
-					gInjectedModule, Profile->Get("Debug", "DebugLog", UINT()));
-				fclose(startupLog);
-			}
+			WriteDllAttachDiagnostic("profile_initialized");
 		#endif
 		}
 
@@ -5304,6 +5317,9 @@ BOOL APIENTRY DllMain( HMODULE hModule,
 		}
 		Shell32::hookDragQueryFileW();
 		Shell32::hookDragQueryFileA();
+		#if UNICODEHACK_PLUGIN_DEBUG
+		WriteDllAttachDiagnostic("all_hooks_installed");
+		#endif
 		break;
 	case DLL_THREAD_ATTACH:
 		setlocale(LC_ALL, "Japanese_Japan.932");
