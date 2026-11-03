@@ -88,7 +88,7 @@ static void WriteLauncherException(const TCHAR* stage, const char* message)
 	_tcscpy_s(slash + 1, _countof(logPath) - (size_t)(slash + 1 - logPath), TEXT("_injector_debug.txt"));
 	FILE* f = nullptr;
 	if( _tfopen_s(&f, logPath, TEXT("a")) != 0 || !f ) return;
-	_ftprintf(f, TEXT("exception_stage=%s\\nexception_message=%hs\\n"), stage, message ? message : "(null)");
+	_ftprintf(f, TEXT("exception_stage=%s\nexception_message=%hs\n"), stage, message ? message : "(null)");
 	fclose(f);
 }
 
