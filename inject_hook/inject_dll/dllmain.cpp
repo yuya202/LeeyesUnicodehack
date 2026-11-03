@@ -4445,7 +4445,27 @@ int __stdcall ArchiveFileInfoDispatchImpl(ArchivePluginCallContext* context, LPS
 	return ret;
 }
 
-// A null output pointer cannot be inspected; preserve the plug-in's
+// Susie GetArchiveInfo returns an array of fileInfo records terminated by
+// method[0] == '\\0'. SPI_ALL_RIGHT alone does not mean that the archive
+// contains any entries: some plug-ins return success with an empty array.
+// Inspect only the first byte, which is sufficient to distinguish an empty
+// list from a non-empty one and does not depend on the full structure layout.
+bool HasArchiveInfoEntries(HLOCAL info)
+{
+	if( !info || ::LocalSize(info) < 1 ) return false;
+	const BYTE* data = reinterpret_cast<const BYTE*>(::LocalLock(info));
+	if( !data ) return false;
+	bool hasEntries = data[0] != 0;
+	::LocalUnlock(info);
+	return hasEntries;
+}
+
+int __stdcall ArchiveInfoDispatchImpl(ArchivePluginCallContext* context, LPSTR Buf,
+	long Len, unsigned int Flag, HLOCAL *Inf)
+{
+	auto original = reinterpret_cast<GetArchiveInfoAM00FPtr>(context->original);
+
+	// A null output pointer cannot be inspected; preserve the plug-in's
 	// original behavior in that unusual call form.
 	if( !Inf ) return original(Buf, Len, Flag, Inf);
 
@@ -4511,7 +4531,6 @@ int __stdcall ArchiveFileInfoDispatchImpl(ArchivePluginCallContext* context, LPS
 #endif
 	return aliasResult == SPI_ALL_RIGHT ? aliasResult : directResult;
 }
-
 
 int __stdcall ArchiveGetFileDispatchImpl(ArchivePluginCallContext* context, LPSTR Src,
 	long Len, LPSTR Dst, unsigned int Flag, SPI_PROGRESS PrgressCallback, long Data)
