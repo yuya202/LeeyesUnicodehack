@@ -1,10 +1,10 @@
-name: Build Leeyes Unicode Hack - Archive Diagnostics - v11 Explicit Diagnostic Flags
+name: Build Leeyes Unicode Hack - Archive Diagnostics - v12 Explicit Diagnostic Flags
 
 on:
   workflow_dispatch:
   push:
     branches:
-      - diagnose-archive-empty-listing-v11-enable-diagnostics
+      - diagnose-archive-empty-listing-v12-enable-diagnostics
 
 permissions:
   contents: read
@@ -18,7 +18,7 @@ jobs:
       - name: Checkout diagnostic branch
         uses: actions/checkout@v4
         with:
-          ref: diagnose-archive-empty-listing-v11-enable-diagnostics
+          ref: diagnose-archive-empty-listing-v12-enable-diagnostics
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
@@ -92,7 +92,7 @@ jobs:
           ) | Set-Content -LiteralPath '.\Leeyes\BUILD-INFO.txt' -Encoding utf8
 
           @(
-              'Leeyes Unicode Hack - Archive Diagnostics - v11 Explicit Diagnostic Flags test instructions'
+              'Leeyes Unicode Hack - Archive Diagnostics - v12 Explicit Diagnostic Flags test instructions'
               ''
               'IMPORTANT: Double-clicking Leeyes.exe directly does not load the diagnostic DLL.'
               'LeeyesDiagLauncher.exe starts the EXISTING standard Leeyes.exe under DEBUG_ONLY_THIS_PROCESS, waits for the initial system breakpoint, then calls ntdll.dll LdrLoadDll and LdrGetProcedureAddress in the target process to load and initialize inject_dll.dll before the Leeyes EXE entry point.'
@@ -117,13 +117,13 @@ jobs:
               }
           $hashes | Set-Content -LiteralPath '.\Leeyes\SHA256SUMS.txt' -Encoding ascii
 
-          Compress-Archive -Path '.\Leeyes\inject_dll.dll', '.\Leeyes\LeeyesDiagLauncher.exe', '.\Leeyes\inject_dll.ini', '.\Leeyes\BUILD-INFO.txt', '.\Leeyes\TEST-INSTRUCTIONS.txt', '.\Leeyes\SHA256SUMS.txt' -DestinationPath '.\dist\LeeyesUnicodeHack_ArchiveDiagnostics_20261103_v11.zip' -Force
+          Compress-Archive -Path '.\Leeyes\inject_dll.dll', '.\Leeyes\LeeyesDiagLauncher.exe', '.\Leeyes\inject_dll.ini', '.\Leeyes\BUILD-INFO.txt', '.\Leeyes\TEST-INSTRUCTIONS.txt', '.\Leeyes\SHA256SUMS.txt' -DestinationPath '.\dist\LeeyesUnicodeHack_ArchiveDiagnostics_20261103_v12.zip' -Force
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LeeyesUnicodeHack-ArchiveDiagnostics-20261103-v11
-          path: dist/LeeyesUnicodeHack_ArchiveDiagnostics_20261103_v11.zip
+          name: LeeyesUnicodeHack-ArchiveDiagnostics-20261103-v12
+          path: dist/LeeyesUnicodeHack_ArchiveDiagnostics_20261103_v12.zip
           if-no-files-found: error
           retention-days: 14
 
