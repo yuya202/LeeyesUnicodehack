@@ -34,7 +34,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          msbuild '.\LeeyesHook.sln' /m /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /p:UNICODEHACK_PLUGIN_DEBUG=1 /p:UNICODEHACK_PATH_DEBUG=0 /p:UNICODEHACK_DIAGNOSTIC_BUILD=1 /p:CL=/wd4996 /verbosity:minimal
+          $env:CL = '/wd4996'
+          msbuild '.\LeeyesHook.sln' /m /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /p:UNICODEHACK_PLUGIN_DEBUG=1 /p:UNICODEHACK_PATH_DEBUG=0 /p:UNICODEHACK_DIAGNOSTIC_BUILD=1 /verbosity:minimal
           if ($LASTEXITCODE -ne 0) {
               throw "MSBuild failed with exit code $LASTEXITCODE"
           }
@@ -102,7 +103,7 @@ jobs:
               '3. Double-click LeeyesDiagLauncher.exe from that same folder. Wait for the normal Leeyes.exe window to appear.'
               '4. Reproduce the archive-listing failure using the specified ZIP.'
               '5. Close Leeyes normally. Send back _injector_debug.txt and _path_debug.txt from the Leeyes folder.'
-              '6. The injector log records remote loader status before debugger detach. The DLL path log must start with dll_attach_stage=process_attach_entered before hook installation; later markers show how far DllMain progressed. If a runtime error occurs, do not repeatedly retry.'
+              '6. The injector log records remote loader status before debugger detach. The DLL path log must start with dll_attach_stage=process_attach_entered before hook installation; later markers show how far DllMain progressed. The build fails at compile time if UNICODEHACK_PLUGIN_DEBUG is not actually enabled. If a runtime error occurs, do not repeatedly retry.'
               ''
               'Do not replace or modify Leeyes.exe. Do not launch any LeeyesW.exe left over from an older test.'
           ) | Set-Content -LiteralPath '.\Leeyes\TEST-INSTRUCTIONS.txt' -Encoding utf8
