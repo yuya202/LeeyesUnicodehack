@@ -4498,7 +4498,7 @@ int __stdcall ArchiveInfoDispatchImpl(ArchivePluginCallContext* context, LPSTR B
 	const int directResult = original(Buf, Len, Flag, &directInfo);
 	if( directResult == SPI_ALL_RIGHT && HasArchiveInfoEntries(directInfo) )
 	{
-		if( aliasInfo ) ::LocalFree(aliasInfo);
+		if( aliasInfo && aliasInfo != directInfo ) ::LocalFree(aliasInfo);
 		*Inf = directInfo;
 #if UNICODEHACK_PLUGIN_DEBUG
 		char detail[MAX_PATH * 2] = {};
@@ -4515,7 +4515,7 @@ int __stdcall ArchiveInfoDispatchImpl(ArchivePluginCallContext* context, LPSTR B
 	// of its returned handle to the caller.
 	if( aliasResult == SPI_ALL_RIGHT )
 	{
-		if( directInfo ) ::LocalFree(directInfo);
+		if( directInfo && directInfo != aliasInfo ) ::LocalFree(directInfo);
 		*Inf = aliasInfo;
 	}
 	else
