@@ -36,6 +36,14 @@
 #define UNICODEHACK_PLUGIN_DEBUG 0
 #endif
 
+#ifndef UNICODEHACK_DIAGNOSTIC_BUILD
+#define UNICODEHACK_DIAGNOSTIC_BUILD 0
+#endif
+
+#if UNICODEHACK_DIAGNOSTIC_BUILD && !UNICODEHACK_PLUGIN_DEBUG
+#error "Diagnostic build requires UNICODEHACK_PLUGIN_DEBUG=1; check MSBuild properties."
+#endif
+
 // NOTE: every injected dll has to export at least one symbol - otherwise
 // the OS loader will fail with STATUS_INVALID_IMAGE_FORMAT (0x0C000007B)
 __declspec(dllexport) void dummyExport() {}
