@@ -4445,46 +4445,73 @@ int __stdcall ArchiveFileInfoDispatchImpl(ArchivePluginCallContext* context, LPS
 	return ret;
 }
 
-int __stdcall ArchiveInfoDispatchImpl(ArchivePluginCallContext* context, LPSTR Buf,
-	long Len, unsigned int Flag, HLOCAL *Inf)
-{
-	auto original = reinterpret_cast<GetArchiveInfoAM00FPtr>(context->original);
-	std::string retryPath;
-	bool needsAlias = !(Flag & 0x07) && Buf && NeedsArchivePathAlias(Buf);
-	int ret = SPI_OTHER_ERROR;
-	int firstResult = SPI_OTHER_ERROR;
-	int secondResult = SPI_OTHER_ERROR;
-	if( needsAlias )
+// A null output pointer cannot be inspected; preserve the plug-in's
+	// original behavior in that unusual call form.
+	if( !Inf ) return original(Buf, Len, Flag, Inf);
+
+	const bool needsAlias = !(Flag & 0x07) && Buf && NeedsArchivePathAlias(Buf);
+	if( !needsAlias ) return original(Buf, Len, Flag, Inf);
+
+	std::string retryPath = GetArchiveRetryPath(Buf);
+	if( retryPath.empty() || retryPath == Buf )
+		return original(Buf, Len, Flag, Inf);
+
+	HLOCAL aliasInfo = nullptr;
+	const int aliasResult = original(const_cast<LPSTR>(retryPath.c_str()),
+		Len, Flag, &aliasInfo);
+	if( aliasResult == SPI_ALL_RIGHT && HasArchiveInfoEntries(aliasInfo) )
 	{
-		// Keep both results distinct: a plug-in may return SPI_ALL_RIGHT with
-		// an empty or unusable listing, so the return code alone is not enough
-		// to establish that the retry path worked.
-		retryPath = GetArchiveRetryPath( Buf );
-		if( !retryPath.empty() )
-		{
-			firstResult = original( const_cast<LPSTR>(retryPath.c_str()), Len, Flag, Inf );
-			ret = firstResult;
-		}
-		if( retryPath.empty() || ret != SPI_ALL_RIGHT )
-		{
-			secondResult = original( Buf, Len, Flag, Inf );
-			ret = secondResult;
-		}
+		*Inf = aliasInfo;
+#if UNICODEHACK_PLUGIN_DEBUG
+		char detail[MAX_PATH * 2] = {};
+		sprintf_s(detail, "retry=[%s] inf=%p size=%lu entries=1 flags=%u len=%ld",
+			retryPath.c_str(), aliasInfo, (unsigned long)::LocalSize(aliasInfo), Flag, Len);
+		LogPluginPath("GetArchiveInfo", Buf, detail, aliasResult, aliasResult, context->moduleName);
+#endif
+		return aliasResult;
+	}
+
+	// The alias path may be accepted by the plug-in while still yielding an
+	// empty list. In that case, try the original ANSI spelling as a second
+	// independent attempt instead of treating SPI_ALL_RIGHT as proof of success.
+	HLOCAL directInfo = nullptr;
+	const int directResult = original(Buf, Len, Flag, &directInfo);
+	if( directResult == SPI_ALL_RIGHT && HasArchiveInfoEntries(directInfo) )
+	{
+		if( aliasInfo ) ::LocalFree(aliasInfo);
+		*Inf = directInfo;
+#if UNICODEHACK_PLUGIN_DEBUG
+		char detail[MAX_PATH * 2] = {};
+		sprintf_s(detail, "retry=[%s] inf=%p size=%lu entries=1 flags=%u len=%ld",
+			retryPath.c_str(), directInfo, (unsigned long)::LocalSize(directInfo), Flag, Len);
+		LogPluginPath("GetArchiveInfo", Buf, detail, aliasResult, directResult, context->moduleName);
+#endif
+		return directResult;
+	}
+
+	// Neither attempt produced entries. Preserve a successful empty result if
+	// either plug-in call returned one; otherwise preserve the direct attempt.
+	// Release the unused LOCAL handle because GetArchiveInfo transfers ownership
+	// of its returned handle to the caller.
+	if( aliasResult == SPI_ALL_RIGHT )
+	{
+		if( directInfo ) ::LocalFree(directInfo);
+		*Inf = aliasInfo;
 	}
 	else
 	{
-		firstResult = original( Buf, Len, Flag, Inf );
-		ret = firstResult;
+		if( aliasInfo ) ::LocalFree(aliasInfo);
+		*Inf = directInfo;
 	}
 #if UNICODEHACK_PLUGIN_DEBUG
 	char detail[MAX_PATH * 2] = {};
-	sprintf_s(detail, "retry=[%s] inf=%p size=%lu flags=%u len=%ld",
-		retryPath.c_str(), (Inf ? *Inf : nullptr),
-		(unsigned long)((Inf && *Inf) ? ::LocalSize(*Inf) : 0), Flag, Len);
-	LogPluginPath( "GetArchiveInfo", Buf, detail, firstResult, secondResult, context->moduleName );
+	sprintf_s(detail, "retry=[%s] inf=%p size=%lu entries=0 flags=%u len=%ld",
+		retryPath.c_str(), *Inf, (unsigned long)((*Inf) ? ::LocalSize(*Inf) : 0), Flag, Len);
+	LogPluginPath("GetArchiveInfo", Buf, detail, aliasResult, directResult, context->moduleName);
 #endif
-	return ret;
+	return aliasResult == SPI_ALL_RIGHT ? aliasResult : directResult;
 }
+
 
 int __stdcall ArchiveGetFileDispatchImpl(ArchivePluginCallContext* context, LPSTR Src,
 	long Len, LPSTR Dst, unsigned int Flag, SPI_PROGRESS PrgressCallback, long Data)
