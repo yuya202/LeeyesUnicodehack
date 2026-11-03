@@ -524,14 +524,11 @@ int _tmain(int argc, _TCHAR* argv[])
 			SetLauncherStage(TEXT("wait_for_dll_bootstrap_with_debug_events"));
 			RemoteBootstrapStatus bootstrapStatus =
 				WaitForBootstrapWithDebugEvents(pInfo, process, remoteStatus);
-			if( !DebugActiveProcessStop(pInfo.dwProcessId) )
-			{
-				DWORD error = GetLastError();
-				std::ostringstream message;
-				message << "DebugActiveProcessStop failed after successful bootstrap: " << error;
-				throw std::runtime_error(message.str());
-			}
-			WriteLauncherDiagnostic(TEXT("debugger_detached"));
+
+			// Record the remote loader result BEFORE attempting to detach the debugger.
+			// DebugActiveProcessStop can fail independently (for example, ERROR_ACCESS_DENIED);
+			// that must never hide whether LdrLoadDll or the exported initializer actually ran.
+			WriteLauncherDiagnostic(TEXT("dll_bootstrap_stage"), bootstrapStatus.stage);
 			WriteLauncherDiagnostic(TEXT("dll_ldrloaddll_status"), bootstrapStatus.loadLibraryStatus);
 			WriteLauncherDiagnostic(TEXT("dll_loaded_module"), bootstrapStatus.loadedModule);
 			WriteLauncherDiagnostic(TEXT("dll_ldrgetprocedureaddress_status"), bootstrapStatus.getProcAddressStatus);
@@ -540,6 +537,17 @@ int _tmain(int argc, _TCHAR* argv[])
 				bootstrapStatus.stage == 4 ? TEXT("dll_initializer_completed") :
 				TEXT("dll_bootstrap_failed"),
 				bootstrapStatus.stage);
+
+			if( !DebugActiveProcessStop(pInfo.dwProcessId) )
+			{
+				DWORD error = GetLastError();
+				WriteLauncherDiagnostic(TEXT("debugger_detach_failed"), error);
+				std::ostringstream message;
+				message << "DebugActiveProcessStop failed: " << error
+					<< "; remote bootstrap stage=" << bootstrapStatus.stage;
+				throw std::runtime_error(message.str());
+			}
+			WriteLauncherDiagnostic(TEXT("debugger_detached"));
 			if( bootstrapStatus.stage != 4 )
 				throw std::exception("DLL load or internal-hook initializer failed");
 
