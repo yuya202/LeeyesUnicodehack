@@ -308,6 +308,10 @@ int _tmain(int argc, _TCHAR* argv[])
 					throw std::exception("DLL bootstrap did not report completion within 30 seconds");
 				Sleep(10);
 			}
+			WriteLauncherDiagnostic(TEXT("dll_loadlibrary_result"),
+				bootstrapStatus.loadLibraryResult);
+			WriteLauncherDiagnostic(TEXT("dll_initializer_export"),
+				bootstrapStatus.getProcAddressResult);
 			WriteLauncherDiagnostic(
 				bootstrapStatus.stage == 4 ? TEXT("dll_initializer_completed") :
 				TEXT("dll_bootstrap_failed"),
