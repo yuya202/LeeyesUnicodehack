@@ -83,8 +83,8 @@ jobs:
               "Repository commit: $env:GITHUB_SHA"
               "Built at (UTC): $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss'))"
               'Configuration: Release | Win32 (x86) | Archive diagnostics enabled'
-              'Diagnostic build: launcher records exact injection stage, exception text, and remote-memory Win32 errors.'
-              'The launcher starts the existing standard Leeyes.exe suspended, loads the DLL, then resumes Leeyes.exe.'
+              'Diagnostic build: launcher waits for the initial Windows debugger breakpoint after PEB.Ldr initialization, injects before the Leeyes EXE entry point, pumps DLL-load debug events, and records injection errors.'
+              'The launcher injects at the initial Windows system breakpoint after loader initialization and before the Leeyes EXE entry point.'
               'LeeyesW.exe is not included or used.'
               'Included: inject_dll.dll, LeeyesDiagLauncher.exe, inject_dll.ini, test instructions, build info, and hashes.'
               'Overlay package: extract all ZIP contents directly into the existing Leeyes folder that contains Leeyes.exe. No manual file-by-file copying is needed.'
@@ -95,7 +95,7 @@ jobs:
               'Leeyes Unicode Hack - Archive Diagnostics test instructions'
               ''
               'IMPORTANT: Double-clicking Leeyes.exe directly does not load the diagnostic DLL.'
-              'LeeyesDiagLauncher.exe starts the EXISTING standard Leeyes.exe in a suspended state, loads inject_dll.dll before Leeyes startup, and then resumes Leeyes.exe.'
+              'LeeyesDiagLauncher.exe starts the EXISTING standard Leeyes.exe under DEBUG_ONLY_THIS_PROCESS, waits for the initial system breakpoint after loader initialization but before the Leeyes EXE entry point, injects and initializes inject_dll.dll, pumps debug events during bootstrap, then detaches.'
               'The running application process is Leeyes.exe. LeeyesW.exe is NOT included and must NOT be used.'
               ''
               '1. Close every running Leeyes.exe and LeeyesDiagLauncher.exe process.'
@@ -122,8 +122,8 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LeeyesUnicodeHack-ArchiveDiagnostics
-          path: dist/LeeyesUnicodeHack_ArchiveDiagnostics.zip
+          name: LeeyesUnicodeHack-ArchiveDiagnostics-20261103-v7
+          path: dist/LeeyesUnicodeHack_ArchiveDiagnostics_20261103_v7.zip
           if-no-files-found: error
           retention-days: 14
 
