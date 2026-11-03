@@ -3,6 +3,7 @@
 
 #include "stdafx.h"
 #include <iostream>
+#include <sstream>
 #include <vector>
 #include <../NInjectLib/Process.h>
 #include <ShlObj.h>
