@@ -1935,6 +1935,7 @@ typedef HANDLE  (WINAPI *CreateFileAFPtr)(     __in     LPCSTR lpFileName,
 );
 CreateFileAFPtr originalCreateFileA = nullptr;
 
+// v12: trace only synthetic archive aliases at the final Win32 file-open boundary.
 #if UNICODEHACK_PLUGIN_DEBUG
 void LogSyntheticArchiveFileAccess(const char* api, const char* input,
 	const std::wstring& resolved, bool mapped, HANDLE result, DWORD lastError)
