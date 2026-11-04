@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <atomic>
 #include <map>
+#include <set>
 #include <memory>
 #include <winternl.h>
 #include "leeyes_internal/hook_runtime.h"
@@ -4528,6 +4529,7 @@ struct ArchivePluginCallContext
 {
 	ArchivePluginFunction function;
 	FARPROC original;
+	HMODULE module;
 	char moduleName[MAX_PATH];
 };
 
@@ -4590,6 +4592,113 @@ bool HasArchiveInfoEntries(HLOCAL info)
 	return hasEntries;
 }
 
+#pragma pack(push, 1)
+struct SusieFileInfoACompat
+{
+	char method[8];
+	DWORD position, compsize, filesize, timestamp;
+	char path[200];
+	char filename[200];
+	DWORD crc;
+};
+struct SusieFileInfoWCompat
+{
+	char method[8];
+	DWORD position, compsize, filesize, timestamp;
+	wchar_t path[200];
+	wchar_t filename[200];
+	DWORD crc;
+};
+#pragma pack(pop)
+static_assert(sizeof(SusieFileInfoACompat) == 428, "Susie fileInfoA size mismatch");
+static_assert(sizeof(SusieFileInfoWCompat) == 828, "Susie fileInfoW size mismatch");
+
+typedef int (__stdcall *GetArchiveInfoWCompatPtr)(LPWSTR, long, unsigned int, HLOCAL*);
+typedef int (__stdcall *GetFileWCompatPtr)(LPWSTR, long, LPWSTR, unsigned int, SPI_PROGRESS, long);
+
+std::mutex gWideArchiveListMutex;
+std::set<std::wstring> gWideArchiveLists;
+
+bool ConvertSusieWideField(const wchar_t* source, char* destination, size_t capacity)
+{
+	if( !source || !destination || capacity == 0 ) return false;
+	size_t length = 0;
+	while( length < 200 && source[length] != L'\\0' ) ++length;
+	std::wstring wide(source, length);
+	BOOL usedDefault = FALSE;
+	int bytes = ::WideCharToMultiByte(932, 0, wide.c_str(), -1, nullptr, 0, "?", &usedDefault);
+	if( bytes <= 0 || static_cast<size_t>(bytes) > capacity ) return false;
+	std::vector<char> converted(static_cast<size_t>(bytes), '\\0');
+	usedDefault = FALSE;
+	if( ::WideCharToMultiByte(932, 0, wide.c_str(), -1, converted.data(), bytes, "?", &usedDefault) != bytes )
+		return false;
+	memcpy(destination, converted.data(), static_cast<size_t>(bytes));
+	if( !wide.empty() )
+	{
+		std::string ansi(converted.data(), static_cast<size_t>(bytes - 1));
+		const bool bestFit = !usedDefault && Utility::IsBestFitConversion(wide, ansi);
+		if( usedDefault || bestFit )
+			Utility::RememberLossyDisplayName(ansi, wide, bestFit);
+	}
+	return true;
+}
+
+bool ConvertSusieWideArchiveInfo(HLOCAL wideHandle, HLOCAL* ansiHandle)
+{
+	if( !wideHandle || !ansiHandle ) return false;
+	*ansiHandle = nullptr;
+	const SIZE_T bytes = ::LocalSize(wideHandle);
+	if( bytes < sizeof(SusieFileInfoWCompat) || bytes % sizeof(SusieFileInfoWCompat) != 0 )
+		return false;
+	const BYTE* locked = reinterpret_cast<const BYTE*>(::LocalLock(wideHandle));
+	if( !locked ) return false;
+	const size_t records = bytes / sizeof(SusieFileInfoWCompat);
+	const SusieFileInfoWCompat* wideInfo = reinterpret_cast<const SusieFileInfoWCompat*>(locked);
+	size_t count = 0;
+	while( count < records && wideInfo[count].method[0] != '\\0' ) ++count;
+	if( count == records || count > (SIZE_MAX / sizeof(SusieFileInfoACompat)) - 1 )
+	{
+		::LocalUnlock(wideHandle);
+		return false;
+	}
+	const SIZE_T outputBytes = (count + 1) * sizeof(SusieFileInfoACompat);
+	HLOCAL output = ::LocalAlloc(LMEM_FIXED | LMEM_ZEROINIT, outputBytes);
+	if( !output )
+	{
+		::LocalUnlock(wideHandle);
+		return false;
+	}
+	SusieFileInfoACompat* ansiInfo = reinterpret_cast<SusieFileInfoACompat*>(output);
+	bool ok = true;
+	for( size_t i = 0; i < count; ++i )
+	{
+		const SusieFileInfoWCompat& from = wideInfo[i];
+		SusieFileInfoACompat& to = ansiInfo[i];
+		memcpy(to.method, from.method, sizeof(to.method));
+		to.position = from.position; to.compsize = from.compsize;
+		to.filesize = from.filesize; to.timestamp = from.timestamp; to.crc = from.crc;
+		if( !ConvertSusieWideField(from.path, to.path, sizeof(to.path))
+			|| !ConvertSusieWideField(from.filename, to.filename, sizeof(to.filename)) )
+		{ ok = false; break; }
+	}
+	::LocalUnlock(wideHandle);
+	if( !ok ) { ::LocalFree(output); return false; }
+	*ansiHandle = output;
+	return true;
+}
+
+bool WasWideArchiveListUsed(const std::wstring& path)
+{
+	std::lock_guard<std::mutex> lock(gWideArchiveListMutex);
+	return gWideArchiveLists.find(path) != gWideArchiveLists.end();
+}
+
+void RememberWideArchiveListUsed(const std::wstring& path)
+{
+	std::lock_guard<std::mutex> lock(gWideArchiveListMutex);
+	gWideArchiveLists.insert(path);
+}
+
 int __stdcall ArchiveInfoDispatchImpl(ArchivePluginCallContext* context, LPSTR Buf,
 	long Len, unsigned int Flag, HLOCAL *Inf)
 {
@@ -4639,10 +4748,50 @@ int __stdcall ArchiveInfoDispatchImpl(ArchivePluginCallContext* context, LPSTR B
 		return directResult;
 	}
 
-	// Neither attempt produced entries. Preserve a successful empty result if
-	// either plug-in call returned one; otherwise preserve the direct attempt.
-	// Release the unused LOCAL handle because GetArchiveInfo transfers ownership
-	// of its returned handle to the caller.
+	// ax7z.spi exposes the Unicode Susie API. Try it only after both ANSI
+	// spellings yielded no entries, then adapt fileInfoW to Leeyes' fileInfo ABI.
+	const char* moduleLeaf = strrchr(context->moduleName, '\\\\');
+	moduleLeaf = moduleLeaf ? moduleLeaf + 1 : context->moduleName;
+	if( _stricmp(moduleLeaf, "ax7z.spi") == 0 && !(Flag & 0x07) )
+	{
+		auto getArchiveInfoW = reinterpret_cast<GetArchiveInfoWCompatPtr>(
+			::GetProcAddress(context->module, "GetArchiveInfoW"));
+		std::wstring wideArchive = GetArchiveWidePath(Buf);
+		if( getArchiveInfoW && !wideArchive.empty() )
+		{
+			HLOCAL wideInfo = nullptr;
+			const int wideResult = getArchiveInfoW(const_cast<LPWSTR>(wideArchive.c_str()), Len, Flag, &wideInfo);
+			const SIZE_T wideBytes = wideInfo ? ::LocalSize(wideInfo) : 0;
+			HLOCAL convertedInfo = nullptr;
+			if( wideResult == SPI_ALL_RIGHT && ConvertSusieWideArchiveInfo(wideInfo, &convertedInfo)
+				&& HasArchiveInfoEntries(convertedInfo) )
+			{
+				if( aliasInfo ) ::LocalFree(aliasInfo);
+				if( directInfo && directInfo != aliasInfo ) ::LocalFree(directInfo);
+				if( wideInfo ) ::LocalFree(wideInfo);
+				*Inf = convertedInfo;
+				RememberWideArchiveListUsed(wideArchive);
+#if UNICODEHACK_PLUGIN_DEBUG
+				char detail[MAX_PATH * 2] = {};
+				sprintf_s(detail, "path=[%ls] wide_size=%lu ansi_size=%lu entries=1 flags=%u len=%ld",
+					wideArchive.c_str(), (unsigned long)wideBytes,
+					(unsigned long)::LocalSize(convertedInfo), Flag, Len);
+				LogPluginPath("GetArchiveInfoW", Buf, detail, wideResult, SPI_ALL_RIGHT, context->moduleName);
+#endif
+				return SPI_ALL_RIGHT;
+			}
+			if( convertedInfo ) ::LocalFree(convertedInfo);
+			if( wideInfo ) ::LocalFree(wideInfo);
+#if UNICODEHACK_PLUGIN_DEBUG
+			char detail[MAX_PATH * 2] = {};
+			sprintf_s(detail, "path=[%ls] wide_size=%lu entries=0 flags=%u len=%ld",
+				wideArchive.c_str(), (unsigned long)wideBytes, Flag, Len);
+			LogPluginPath("GetArchiveInfoW", Buf, detail, wideResult, wideResult, context->moduleName);
+#endif
+		}
+	}
+
+	// Preserve the previous ANSI result when the W export is absent or unusable.
 	if( aliasResult == SPI_ALL_RIGHT )
 	{
 		if( directInfo && directInfo != aliasInfo ) ::LocalFree(directInfo);
@@ -4708,6 +4857,39 @@ int __stdcall ArchiveGetFileDispatchImpl(ArchivePluginCallContext* context, LPST
 		if( !retryPath.empty() )
 			ret = original( const_cast<LPSTR>(retryPath.c_str()), Len, Dst, Flag, PrgressCallback, Data );
 	}
+	// When this archive was enumerated with GetArchiveInfoW, pair the
+	// listing with GetFileW using the same member position.
+	if( needsAlias && _stricmp(moduleFileName, "ax7z.spi") == 0 )
+	{
+		std::wstring wideArchive = GetArchiveWidePath(Src);
+		if( !wideArchive.empty() && WasWideArchiveListUsed(wideArchive) )
+		{
+			auto getFileW = reinterpret_cast<GetFileWCompatPtr>(
+				::GetProcAddress(context->module, "GetFileW"));
+			if( getFileW )
+			{
+				std::wstring wideDestination;
+				LPWSTR destinationW = nullptr;
+				if( Dst && (Flag & 0x100) )
+					destinationW = reinterpret_cast<LPWSTR>(Dst);
+				else if( Dst )
+				{
+					wideDestination = Utility::GetWidePath(Dst);
+					if( !wideDestination.empty() ) destinationW = const_cast<LPWSTR>(wideDestination.c_str());
+				}
+				ret = getFileW(const_cast<LPWSTR>(wideArchive.c_str()), Len,
+					destinationW, Flag, PrgressCallback, Data);
+#if UNICODEHACK_PLUGIN_DEBUG
+				char detail[MAX_PATH * 2] = {};
+				sprintf_s(detail, "path=[%ls] len=%ld flag=%u dst=%p",
+					wideArchive.c_str(), Len, Flag, destinationW);
+				LogPluginPath("GetFileW", Src, detail, SPI_ALL_RIGHT, ret, context->moduleName);
+#endif
+				if( ret == SPI_ALL_RIGHT ) return ret;
+			}
+		}
+	}
+
 	if( !needsAlias || ret != SPI_ALL_RIGHT )
 	{
 		originalResult = original( Src, Len, Dst, Flag, PrgressCallback, Data );
@@ -4845,8 +5027,8 @@ FARPROC WrapArchivePluginFunction(HMODULE hModule, const char* procName, FARPROC
 	auto* context = new ArchivePluginCallContext();
 	context->function = function;
 	context->original = original;
+	context->module = hModule;
 	strncpy_s(context->moduleName, sizeof(context->moduleName), moduleName ? moduleName : "", _TRUNCATE);
-	(void)hModule;
 	void* thunk = CreateArchivePluginThunk(context, dispatch);
 	return thunk ? reinterpret_cast<FARPROC>(thunk) : original;
 }
