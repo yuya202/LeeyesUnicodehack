@@ -4857,6 +4857,9 @@ int __stdcall ArchiveGetFileDispatchImpl(ArchivePluginCallContext* context, LPST
 		if( !retryPath.empty() )
 			ret = original( const_cast<LPSTR>(retryPath.c_str()), Len, Dst, Flag, PrgressCallback, Data );
 	}
+	// Keep the successful ANSI-alias result available if the W extraction
+	// attempt fails; otherwise the fallback below must not discard it.
+	const int aliasAttemptResult = ret;
 	// When this archive was enumerated with GetArchiveInfoW, pair the
 	// listing with GetFileW using the same member position.
 	if( needsAlias && _stricmp(moduleFileName, "ax7z.spi") == 0 )
@@ -4889,6 +4892,8 @@ int __stdcall ArchiveGetFileDispatchImpl(ArchivePluginCallContext* context, LPST
 			}
 		}
 	}
+	if( ret != SPI_ALL_RIGHT && aliasAttemptResult == SPI_ALL_RIGHT )
+		ret = aliasAttemptResult;
 
 	if( !needsAlias || ret != SPI_ALL_RIGHT )
 	{
