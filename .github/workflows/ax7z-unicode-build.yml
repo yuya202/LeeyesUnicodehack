@@ -1,0 +1,87 @@
+name: Build ax7z Unicode API patch (Win32)
+
+on:
+  push:
+    branches:
+      - fix-archive-unicode-w-api
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Prepare output directory
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path 'Leeyes' | Out-Null
+          New-Item -ItemType Directory -Force -Path 'dist' | Out-Null
+
+      - name: Build solution (Release Win32)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:CL = '/wd4996'
+          msbuild '.\LeeyesHook.sln' /m /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { throw "MSBuild failed with exit code $LASTEXITCODE" }
+
+      - name: Verify and package DLL
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dll = '.\Leeyes\inject_dll.dll'
+          if (-not (Test-Path -LiteralPath $dll -PathType Leaf)) { throw "Missing build output: $dll" }
+          Copy-Item -LiteralPath '.\inject_dll.ini' -Destination '.\Leeyes\inject_dll.ini' -Force
+
+          $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $dll))
+          if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw 'DLL is not a valid PE/MZ file' }
+          $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+          if ($pe -lt 0 -or $pe + 6 -gt $bytes.Length -or $bytes[$pe] -ne 0x50 -or $bytes[$pe+1] -ne 0x45 -or $bytes[$pe+2] -ne 0 -or $bytes[$pe+3] -ne 0) { throw 'Invalid PE header' }
+          $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
+          if ($machine -ne 0x014c) { throw "Expected Win32 x86 DLL, got 0x$('{0:X4}' -f $machine)" }
+
+          @(
+            'Leeyes Unicode Hack - ax7z Unicode API patch'
+            "Repository commit: $env:GITHUB_SHA"
+            "Built at (UTC): $([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss'))"
+            'Configuration: Release | Win32 (x86)'
+            'Included: inject_dll.dll and inject_dll.ini'
+            'Leeyes.exe is not included or modified.'
+            'Build success does not prove runtime compatibility; test with a copy of the Leeyes folder.'
+          ) | Set-Content -LiteralPath '.\Leeyes\BUILD-INFO.txt' -Encoding utf8
+
+          Get-ChildItem -LiteralPath '.\Leeyes' -File |
+            Where-Object { $_.Name -in @('inject_dll.dll','inject_dll.ini','BUILD-INFO.txt') } |
+            Sort-Object Name |
+            ForEach-Object { $h = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256; "$($h.Hash.ToLower()) $($_.Name)" } |
+            Set-Content -LiteralPath '.\Leeyes\SHA256SUMS.txt' -Encoding ascii
+
+          Compress-Archive -Path '.\Leeyes\inject_dll.dll','.\Leeyes\inject_dll.ini','.\Leeyes\BUILD-INFO.txt','.\Leeyes\SHA256SUMS.txt' -DestinationPath '.\dist\Leeyes_ax7z_Unicode_Win32.zip' -Force
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Leeyes-ax7z-Unicode-Win32
+          path: dist/Leeyes_ax7z_Unicode_Win32.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Leeyes-ax7z-Unicode-build-logs
+          path: |
+            **/*.log
+            **/MSBuild*.binlog
+          if-no-files-found: ignore
+          retention-days: 7
